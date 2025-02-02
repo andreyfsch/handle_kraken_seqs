@@ -1,11 +1,15 @@
 import math
 import os
 import random
+import subprocess
 import sys
+import pathlib
+from progress.bar import Bar
 
 import pandas as pd
 import taxoniq
-from bigtree import Node, add_path_to_tree, find_attr, print_tree
+from bigtree import Node, add_path_to_tree, find_name, tree_to_newick, \
+    newick_to_tree, find_attrs, print_tree
 
 KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
 KRAKEN_DATABASE = "viral"
@@ -147,47 +151,110 @@ def write_map_file(mapdict, filename):
 def create_taxon_structure(sequences, ranked_taxon_ids):
     pass
 
+def get_num_genomes():
+    gen_dir = f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes"
+    return len(
+        [
+            name
+            for name in os.listdir(gen_dir)
+            if os.path.isdir(os.path.join(gen_dir, name))
+        ]
+    )
+
 
 def generate_seqs_by_taxon_tree():
-    seqs_by_taxon_tree = Node("root")
+    taxon_tree = Node("root")
     gen_dir = f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes"
     tax_ids = get_tax_ids()
-    first = True
-    for subdir, _, _ in os.walk(gen_dir):
-        if first:  # skip /genomes
-            first = False
-            continue
+
+    file_tree = os.walk(gen_dir)
+    file_tree.__next__()
+
+    num_genomes = get_num_genomes()
+
+    bar = Bar("Loading taxon tree", max=num_genomes)
+    for subdir, _, _ in file_tree:
         seq_ref = subdir.split("/")[-1]
         tax_id = tax_ids[seq_ref]
 
+        sequences = get_genome_sequences(seq_ref)
         t = taxoniq.Taxon(tax_id)
         ranked_taxons = t.ranked_lineage
         path_parent_rank = ""
-        for ranked_taxon in reversed(ranked_taxons):
+        for idx, ranked_taxon in enumerate(reversed(ranked_taxons)):
             slash = "" if path_parent_rank == "" else "/"
             path_parent_rank += slash + ranked_taxon.scientific_name
-            if find_attr(
-                seqs_by_taxon_tree,
-                "name",
+            if find_name(
+                taxon_tree,
                 ranked_taxon.scientific_name
             ):
-                continue
+                if idx == len(ranked_taxons) - 1:
+                    add_path_to_tree(
+                        taxon_tree,
+                        f"{ path_parent_rank }/{ seq_ref }",
+                        node_attrs={"rank": "genome"},
+                    )
+                    for subseq_ref, seq in sequences.items():
+                        add_path_to_tree(
+                            taxon_tree,
+                            f"{ path_parent_rank }/{ seq_ref }/{ subseq_ref }",
+                            node_attrs={"rank": "sequence", "seq": seq},
+                        )
+                else:
+                    continue
             else:
                 if ranked_taxon.rank.name == "superkingdom":
-                    seqs_by_taxon_tree = Node(
-                        ranked_taxon.scientific_name
-                    )
-                    seqs_by_taxon_tree.set_attrs(
-                        {"rank": ranked_taxon.rank.name})
+                    taxon_tree = Node.from_dict({
+                        "name": ranked_taxon.scientific_name,
+                        "rank": ranked_taxon.rank.name
+                    })
                 else:
                     add_path_to_tree(
-                        seqs_by_taxon_tree,
+                        taxon_tree,
                         path_parent_rank,
                         node_attrs={"rank": ranked_taxon.rank.name},
                     )
-                    print(path_parent_rank)
+                    if idx == len(ranked_taxons) - 1:
+                        add_path_to_tree(
+                            taxon_tree,
+                            f"{ path_parent_rank }/{ seq_ref }",
+                            node_attrs={"rank": "genome"},
+                        )
+                        for subseq_ref, seq in sequences.items():
+                            add_path_to_tree(
+                                taxon_tree,
+                                f"{ path_parent_rank }/{ seq_ref }/" +
+                                f"{ subseq_ref }",
+                                node_attrs={"rank": "sequence", "seq": seq},
+                            )
+        bar.next()
+    bar.finish()
+    return taxon_tree
 
-    return seqs_by_taxon_tree
+
+def get_genome_sequences(seq_ref):
+    sequences = {}
+    with open(
+        f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes/{seq_ref}/genome.fna"
+    ) as f:
+        lines = f.readlines()
+        subseq = None
+        subseq_ref = ""
+        for i in range(len(lines)):
+            # >NC_019947.1 Tomato yellow mottle virus segment DNA-B, complete sequence
+            if lines[i].startswith(">"):
+                if subseq:
+                    sequences[subseq_ref] = subseq
+                subseq_ref = lines[i].split()[0][1:]
+                subseq = ""
+            elif i == len(lines) - 1:
+                subseq += lines[i].rstrip()
+                sequences[subseq_ref] = subseq
+            else:
+                subseq += lines[i].rstrip()
+    f.close()
+
+    return sequences
 
 
 def get_sequences(n=0):
@@ -367,8 +434,80 @@ def write_csv(n_seqs=0, n_subseqs=100, min_subseq_len=100, max_subseq_len=512):
     print("Done!")
 
 
+def seqs_by_taxon_tree_to_newick():
+    tree = generate_seqs_by_taxon_tree()
+    with open("seqs_by_taxon_tree.newick", "w") as f:
+        f.write(tree_to_newick(tree, attr_list=["rank", "seq"]))
+    f.close()
+
+
+def newick_seqs_by_taxon_to_tree():
+    with open("seqs_by_taxon_tree.newick", "r") as f:
+        newick = f.read()
+    f.close()
+    return newick_to_tree(newick)
+
+
+def get_leaves_multiple_refseq(tree):
+    # tree = newick_seqs_by_taxon_to_tree()
+    all_leaves = []
+    all_genomes = find_attrs(tree, "rank", "genome")
+    for genome in all_genomes:
+        all_leaves.append(genome.parent)
+    all_leaves = set(all_leaves)
+    leaves_mult_refseq = []
+    for leaf in all_leaves:
+        print(find_attrs(leaf, "rank", "genome"))
+        if len(find_attrs(leaf, "rank", "genome")) > 1:
+            leaves_mult_refseq.append(leaf)
+    return leaves_mult_refseq
+
+
+def get_sequences_leaf_mult_refseq(leaf):
+    sequences = {}
+    for genome in find_attrs(leaf, "rank", "genome"):
+        sequence = ""
+        for seq in find_attrs(genome, "rank", "sequence"):
+            sequence += seq.get_attr("seq")
+        sequences[genome.node_name] = sequence
+    return sequences
+
+
+def write_leaf_mult_refseqs_fasta(leaf):
+    sequences = get_sequences_leaf_mult_refseq(leaf)
+    with open(f"{ leaf.node_name }.fasta", "w") as f:
+        for ref_seq, sequence in sequences.items():
+            f.write(f">{ ref_seq }\n{ sequence }\n")
+    f.close()
+
+
+def align_sequences(leaf):
+    subprocess.run([
+        "clustalo", "-i", f"{ leaf.node_name }.fasta",
+        "-o", f"{ leaf.node_name }.aln"
+    ])
+
+
+def align_all_leaves_mult_refseq(tree):
+    leaves_mult_refseq = get_leaves_multiple_refseq(tree)
+    for leaf in leaves_mult_refseq:
+        write_leaf_mult_refseqs_fasta(leaf)
+        align_sequences(leaf)
+        # remove_fasta_files(leaf)
+
+
+def remove_fasta_files(leaf):
+    pathlib.Path.unlink(f"{ leaf.node_name }.fasta")
+    # pathlib.Path.unlink(f"{ species.node_name }.aln")
+
+
+sys.stdout.write('\033[2J\033[H')
 tree = generate_seqs_by_taxon_tree()
-print_tree(tree)
+align_all_leaves_mult_refseq(tree)
+
+# def get_consensus_seq_species_mult_refseq(species):
+#     sequences = get_sequences_species_mult_refseq(species)
+
 
 # viral_seqs = get_sequences()
 
