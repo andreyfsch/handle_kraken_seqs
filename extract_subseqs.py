@@ -9,7 +9,7 @@ from progress.bar import Bar
 import pandas as pd
 import taxoniq
 from bigtree import Node, add_path_to_tree, find_name, tree_to_newick, \
-    newick_to_tree, find_attrs, print_tree
+    newick_to_tree, find_attrs
 
 KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
 KRAKEN_DATABASE = "viral"
@@ -150,6 +150,7 @@ def write_map_file(mapdict, filename):
 
 def create_taxon_structure(sequences, ranked_taxon_ids):
     pass
+
 
 def get_num_genomes():
     gen_dir = f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes"
@@ -474,6 +475,8 @@ def get_sequences_leaf_mult_refseq(leaf):
 
 
 def write_leaf_mult_refseqs_fasta(leaf):
+    if os.path.isfile(f"{ leaf.node_name }.fasta"):
+        return
     sequences = get_sequences_leaf_mult_refseq(leaf)
     with open(f"{ leaf.node_name }.fasta", "w") as f:
         for ref_seq, sequence in sequences.items():
@@ -482,6 +485,8 @@ def write_leaf_mult_refseqs_fasta(leaf):
 
 
 def align_sequences(leaf):
+    if os.path.isfile(f"{ leaf.node_name }.aln"):
+        return
     subprocess.run([
         "clustalo", "-i", f"{ leaf.node_name }.fasta",
         "-o", f"{ leaf.node_name }.aln"
@@ -490,10 +495,13 @@ def align_sequences(leaf):
 
 def align_all_leaves_mult_refseq(tree):
     leaves_mult_refseq = get_leaves_multiple_refseq(tree)
+    bar = Bar("Align multiple RefSeq species", max=len(leaves_mult_refseq))
     for leaf in leaves_mult_refseq:
         write_leaf_mult_refseqs_fasta(leaf)
         align_sequences(leaf)
+        bar.next()
         # remove_fasta_files(leaf)
+    bar.finish()
 
 
 def remove_fasta_files(leaf):
@@ -501,12 +509,73 @@ def remove_fasta_files(leaf):
     # pathlib.Path.unlink(f"{ species.node_name }.aln")
 
 
-sys.stdout.write('\033[2J\033[H')
+def extract_subseqs_from_aln(filename):
+    with open(f"{ filename }.aln") as f:
+        lines = f.readlines()
+        subseqs = {}
+        subseq = ""
+        subseq_ref = ""
+        for i in range(len(lines)):
+            if lines[i].startswith(">"):
+                if subseq:
+                    subseqs[subseq_ref] = subseq
+                subseq_ref = lines[i].split()[0][1:]
+                subseq = ""
+            elif i == len(lines) - 1:
+                subseq += lines[i].rstrip()
+                subseqs[subseq_ref] = subseq
+            else:
+                subseq += lines[i].rstrip()
+    f.close()
+    has_gap = False
+    for subseq_ref, seq in subseqs.items():
+        if "-" in seq:
+            has_gap = True
+            break
+    if not has_gap:
+        return {subseq_ref: subseqs[subseq_ref]}
+    else:
+        subseq_gaps = {}
+        for subseq_ref, seq in subseqs.items():
+            for i in range(0, len(seq), 512):
+                if "-" not in seq[i: i + 512]:
+                    consensus = True
+                    for subseq_ref_search, seq_search in subseqs.items():
+                        if subseq_ref_search == subseq_ref:
+                            continue
+                        if (seq[i: i + 512] != seq_search[i: i + 512]):
+                            consensus = False
+                            break
+                    if consensus:
+                        subseq_gaps[f"consensus.{i}"] = seq[i: i + 512]
+                    elif seq[i: i + 512] not in subseq_gaps.values():
+                        subseq_gaps[f"{subseq_ref}.{i}.no-consensus"] = seq[i: i + 512]
+                else:
+                    for subseq_ref_search, seq_search in subseqs.items():
+                        if subseq_ref_search == subseq_ref:
+                            continue
+                        if (
+                                "-" not in seq_search[i: i + 512] and
+                                seq_search[i: i + 512]
+                                not in subseq_gaps.values()
+                        ):
+                            subseq_gaps[
+                                f"{subseq_ref}.{i}.no-gap"
+                            ] = seq_search[i: i + 512]
+                            break
+                        if seq_search[i: i + 512] not in subseq_gaps.values():
+                            subseq_gaps[f"{subseq_ref}.{i}.no-gap_not-found"] = seq_search[i: i +
+                                                                          512].replace("-", "")
+        return subseq_gaps
+
+
 tree = generate_seqs_by_taxon_tree()
 align_all_leaves_mult_refseq(tree)
 
 # def get_consensus_seq_species_mult_refseq(species):
-#     sequences = get_sequences_species_mult_refseq(species)
+#   sequences = get_sequences_species_mult_refseq(species)
+#   TACCACAGGTTACGCTGAGTTATTTT
+#   TACCACAGGTTACGCTGAGTTATTTT
 
 
 # viral_seqs = get_sequences()
