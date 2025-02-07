@@ -458,7 +458,6 @@ def get_leaves_multiple_refseq(tree):
     all_leaves = set(all_leaves)
     leaves_mult_refseq = []
     for leaf in all_leaves:
-        print(find_attrs(leaf, "rank", "genome"))
         if len(find_attrs(leaf, "rank", "genome")) > 1:
             leaves_mult_refseq.append(leaf)
     return leaves_mult_refseq
@@ -475,21 +474,25 @@ def get_sequences_leaf_mult_refseq(leaf):
 
 
 def write_leaf_mult_refseqs_fasta(leaf):
-    if os.path.isfile(f"{ leaf.node_name }.fasta"):
+    if os.path.isfile(f"fasta/{ leaf.node_name }.fasta"):
         return
     sequences = get_sequences_leaf_mult_refseq(leaf)
-    with open(f"{ leaf.node_name }.fasta", "w") as f:
+    with open(f"fasta/{ leaf.node_name }.fasta", "w") as f:
         for ref_seq, sequence in sequences.items():
             f.write(f">{ ref_seq }\n{ sequence }\n")
     f.close()
 
 
 def align_sequences(leaf):
-    if os.path.isfile(f"{ leaf.node_name }.aln"):
+    if os.path.isfile(f"aln/{ leaf.node_name }.aln"):
         return
     subprocess.run([
-        "clustalo", "-i", f"{ leaf.node_name }.fasta",
-        "-o", f"{ leaf.node_name }.aln"
+        "clustalo", "-i", f"fasta/{ leaf.node_name }.fasta",
+        "-o", f"aln/{ leaf.node_name }.aln",
+        "--threads", "40",
+        "--log", "clustalo.log",
+        "--verbose",
+        "--force"
     ])
 
 
