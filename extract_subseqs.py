@@ -178,6 +178,7 @@ def generate_seqs_by_taxon_tree():
         seq_ref = subdir.split("/")[-1]
         tax_id = tax_ids[seq_ref]
 
+        visited_nodes = set()
         sequences = get_genome_sequences(seq_ref)
         t = taxoniq.Taxon(tax_id)
         ranked_taxons = t.ranked_lineage
@@ -185,10 +186,7 @@ def generate_seqs_by_taxon_tree():
         for idx, ranked_taxon in enumerate(reversed(ranked_taxons)):
             slash = "" if path_parent_rank == "" else "/"
             path_parent_rank += slash + ranked_taxon.scientific_name
-            if find_name(
-                taxon_tree,
-                ranked_taxon.scientific_name
-            ):
+            if path_parent_rank in visited_nodes:
                 if idx == len(ranked_taxons) - 1:
                     add_path_to_tree(
                         taxon_tree,
@@ -205,11 +203,13 @@ def generate_seqs_by_taxon_tree():
                     continue
             else:
                 if ranked_taxon.rank.name == "superkingdom":
+                    visited_nodes |= {path_parent_rank}
                     taxon_tree = Node.from_dict({
                         "name": ranked_taxon.scientific_name,
                         "rank": ranked_taxon.rank.name
                     })
                 else:
+                    visited_nodes |= {path_parent_rank}
                     add_path_to_tree(
                         taxon_tree,
                         path_parent_rank,
