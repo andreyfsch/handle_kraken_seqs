@@ -1,3 +1,7 @@
 aln/
 fasta/
 clustalo.log
+run_extraction.batch
+__pycache__/
+aln_progress
+check_aln_progress.sh

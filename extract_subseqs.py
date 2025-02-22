@@ -6,12 +6,12 @@ import sys
 import pathlib
 from progress.bar import Bar
 
-import pandas as pd
+#import pandas as pd
 import taxoniq
 from bigtree import Node, add_path_to_tree, find_name, tree_to_newick, \
     newick_to_tree, find_attrs
 
-KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
+KRAKEN_PATH = "/home/aschoier/workspace/kraken2"
 KRAKEN_DATABASE = "viral"
 
 
@@ -172,13 +172,12 @@ def generate_seqs_by_taxon_tree():
     file_tree.__next__()
 
     num_genomes = get_num_genomes()
-
+    visited_nodes = set()
     bar = Bar("Loading taxon tree", max=num_genomes)
     for subdir, _, _ in file_tree:
         seq_ref = subdir.split("/")[-1]
         tax_id = tax_ids[seq_ref]
 
-        visited_nodes = set()
         sequences = get_genome_sequences(seq_ref)
         t = taxoniq.Taxon(tax_id)
         ranked_taxons = t.ranked_lineage
@@ -484,12 +483,12 @@ def write_leaf_mult_refseqs_fasta(leaf):
 
 
 def align_sequences(leaf):
-    if os.path.isfile(f"aln/{ leaf.node_name }.aln"):
-        return
+    fasta_file = f"fasta/{ leaf.node_name }.fasta"
+    aln_file = f"aln/{ leaf.node_name }.aln"
     subprocess.run([
-        "clustalo", "-i", f"fasta/{ leaf.node_name }.fasta",
-        "-o", f"aln/{ leaf.node_name }.aln",
-        "--threads", "40",
+        "clustalo", "-i", fasta_file,
+        "-o", aln_file,
+        "--threads", "50",
         "--log", "clustalo.log",
         "--verbose",
         "--force"
@@ -497,6 +496,7 @@ def align_sequences(leaf):
 
 
 def align_all_leaves_mult_refseq(tree):
+    print('teste')
     leaves_mult_refseq = get_leaves_multiple_refseq(tree)
     bar = Bar("Align multiple RefSeq species", max=len(leaves_mult_refseq))
     for leaf in leaves_mult_refseq:
