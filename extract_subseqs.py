@@ -5,13 +5,23 @@ import subprocess
 import sys
 import pathlib
 from progress.bar import Bar
+from Bio import Align
 
-#import pandas as pd
+# import pandas as pd
 import taxoniq
 from bigtree import Node, add_path_to_tree, find_name, tree_to_newick, \
-    newick_to_tree, find_attrs
+    newick_to_tree, find_attrs, find_attr, clone_tree, \
+    copy_and_replace_nodes_from_tree_to_tree
 
-KRAKEN_PATH = "/home/aschoier/workspace/kraken2"
+from itertools import groupby
+
+
+def all_equal(iterable):
+    g = groupby(iterable)
+    return next(g, True) and not next(g, False)
+
+
+KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
 KRAKEN_DATABASE = "viral"
 
 
@@ -69,11 +79,6 @@ def extract_subseqs(seq, n, min_len, max_len):
     return subseqs
 
 
-def get_taxon_rank(taxon_id):
-    t = taxoniq.Taxon(taxon_id)
-    return t.rank.name
-
-
 def get_tax_id_taxoniq(ranked_taxon):
     str_taxon = str(ranked_taxon)
     str_tax_id = str_taxon[str_taxon.find("(") + 1: str_taxon.find(")")]
@@ -127,31 +132,6 @@ def get_tax_ids():
     return tax_ids
 
 
-def get_species_id(seq_ref):
-    tax_id = get_tax_id(seq_ref)
-    with open(f"{ KRAKEN_PATH }/{ KRAKEN_DATABASE }/taxid2specid.map") as f:
-        for line in f.readlines():
-            if line.rstrip().split()[0] == tax_id:
-                species_id = int(line.split()[-1])
-                break
-    f.close()
-
-    return species_id
-
-
-def write_map_file(mapdict, filename):
-    with open(
-        f"{ KRAKEN_PATH }/{ KRAKEN_DATABASE }/{ filename }.map", "w"
-    ) as f:
-        for key, val in mapdict.items():
-            f.write(str(key) + " " + str(val) + "\n")
-    f.close()
-
-
-def create_taxon_structure(sequences, ranked_taxon_ids):
-    pass
-
-
 def get_num_genomes():
     gen_dir = f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes"
     return len(
@@ -192,11 +172,15 @@ def generate_seqs_by_taxon_tree():
                         f"{ path_parent_rank }/{ seq_ref }",
                         node_attrs={"rank": "genome"},
                     )
-                    for subseq_ref, seq in sequences.items():
+                    for subseq_ref, seq_list in sequences.items():
                         add_path_to_tree(
                             taxon_tree,
                             f"{ path_parent_rank }/{ seq_ref }/{ subseq_ref }",
-                            node_attrs={"rank": "sequence", "seq": seq},
+                            node_attrs={
+                                "rank": "sequence",
+                                "seq_name": seq_list[0],
+                                "seq": seq_list[1]
+                            },
                         )
                 else:
                     continue
@@ -218,18 +202,31 @@ def generate_seqs_by_taxon_tree():
                         add_path_to_tree(
                             taxon_tree,
                             f"{ path_parent_rank }/{ seq_ref }",
-                            node_attrs={"rank": "genome"},
+                            node_attrs={
+                                "rank": "genome",
+                            },
                         )
-                        for subseq_ref, seq in sequences.items():
+                        for subseq_ref, seq_list in sequences.items():
                             add_path_to_tree(
                                 taxon_tree,
                                 f"{ path_parent_rank }/{ seq_ref }/" +
                                 f"{ subseq_ref }",
-                                node_attrs={"rank": "sequence", "seq": seq},
+                                node_attrs={
+                                    "rank": "sequence",
+                                    "seq": seq_list[1],
+                                    "seq_name": seq_list[0]
+                                },
                             )
         bar.next()
     bar.finish()
     return taxon_tree
+
+
+def get_genome_size(sequences):
+    total_len = 0
+    for seq in sequences.values():
+        total_len += len(seq)
+    return total_len
 
 
 def get_genome_sequences(seq_ref):
@@ -240,16 +237,19 @@ def get_genome_sequences(seq_ref):
         lines = f.readlines()
         subseq = None
         subseq_ref = ""
+        subseq_name = ""
         for i in range(len(lines)):
             # >NC_019947.1 Tomato yellow mottle virus segment DNA-B, complete sequence
             if lines[i].startswith(">"):
                 if subseq:
-                    sequences[subseq_ref] = subseq
-                subseq_ref = lines[i].split()[0][1:]
+                    sequences[subseq_ref] = [subseq_name, subseq]
+                line_split = lines[i].split()
+                subseq_ref = line_split[0][1:]
+                subseq_name = " ".join(line_split[1:])
                 subseq = ""
             elif i == len(lines) - 1:
                 subseq += lines[i].rstrip()
-                sequences[subseq_ref] = subseq
+                sequences[subseq_ref] = [subseq_name, subseq]
             else:
                 subseq += lines[i].rstrip()
     f.close()
@@ -434,22 +434,7 @@ def write_csv(n_seqs=0, n_subseqs=100, min_subseq_len=100, max_subseq_len=512):
     print("Done!")
 
 
-def seqs_by_taxon_tree_to_newick():
-    tree = generate_seqs_by_taxon_tree()
-    with open("seqs_by_taxon_tree.newick", "w") as f:
-        f.write(tree_to_newick(tree, attr_list=["rank", "seq"]))
-    f.close()
-
-
-def newick_seqs_by_taxon_to_tree():
-    with open("seqs_by_taxon_tree.newick", "r") as f:
-        newick = f.read()
-    f.close()
-    return newick_to_tree(newick)
-
-
 def get_leaves_multiple_refseq(tree):
-    # tree = newick_seqs_by_taxon_to_tree()
     all_leaves = []
     all_genomes = find_attrs(tree, "rank", "genome")
     for genome in all_genomes:
@@ -472,6 +457,17 @@ def get_sequences_leaf_mult_refseq(leaf):
     return sequences
 
 
+def get_subsequences_leaf_mult_refseq(leaf):
+    sequences = {}
+    for refseq in find_attrs(leaf, "rank", "genome"):
+        sequence = {}
+        for subseq in find_attrs(refseq, "rank", "sequence"):
+            sequence[subseq.node_name] = [
+                subseq.get_attr("seq_name"), subseq.get_attr("seq")]
+        sequences[refseq.node_name] = sequence
+    return sequences
+
+
 def write_leaf_mult_refseqs_fasta(leaf):
     if os.path.isfile(f"fasta/{ leaf.node_name }.fasta"):
         return
@@ -480,6 +476,64 @@ def write_leaf_mult_refseqs_fasta(leaf):
         for ref_seq, sequence in sequences.items():
             f.write(f">{ ref_seq }\n{ sequence }\n")
     f.close()
+
+
+def write_leaf_mult_refseqs_fastas(leaf):
+    if not os.path.exists(f"fasta/{leaf.node_name}"):
+        os.makedirs(f"fasta/{ leaf.node_name }")
+
+    file_too_long = 0
+    sequences = get_subsequences_leaf_mult_refseq(leaf)
+    fasta_subseqs = {}
+    for refseq, subseqs in sequences.items():
+        for subseq_ref, subseq_list in subseqs.items():
+            if subseq_list[0] not in fasta_subseqs.keys():
+                fasta_subseqs[subseq_list[0]] = []
+            fasta_subseqs[subseq_list[0]].append({refseq: subseq_list[1]})
+
+    # should consider same subseq_name if all subseq_name fastas
+    # contains only one sequence, each of a different refseq and all
+    # subseq_names contains strain, phage, isolate or one or
+    # more of them contains clone or isolate
+    merge_subseqs = False
+    keywords_merge = ["strain", "phage", "isolate", "clone", "complete", "partial"]
+    compare_subseqref = None
+    for subseq_name, subseqs in fasta_subseqs.items():
+        if merge_subseqs:
+            if compare_subseqref == list(subseqs[0].keys())[0]:
+                merge_subseqs = False
+        if (len(subseqs) == 1
+                and any(ext.lower() in subseq_name for ext in keywords_merge)):
+            compare_subseqref = list(subseqs[0].keys())[0]
+            merge_subseqs = True
+
+    if merge_subseqs:
+        new_fasta_subseqs = {}
+        new_fasta_subseqs[leaf.node_name] = []
+        for refseq, subseqs in sequences.items():
+            for subseq_ref, subseq_list in subseqs.items():
+                new_fasta_subseqs[leaf.node_name].append(
+                    {refseq: subseq_list[1]})
+        fasta_subseqs = new_fasta_subseqs
+
+    for subseq_name, subseqs in fasta_subseqs.items():
+        new_subseq_name = subseq_name.replace('/', '-')
+        if len(new_subseq_name) > 200:
+            file_too_long += 1
+            with open(f"fasta/{ leaf.node_name }/name_too_long{ file_too_long }", "w") as f:
+                f.write(new_subseq_name)
+            f.close()
+            with open(f"fasta/{ leaf.node_name }/name_too_long{ file_too_long }.fasta", "w") as f:
+                for subseq in subseqs:
+                    for refseq, seq in subseq.items():
+                        f.write(f">{ refseq }\n{ seq }\n")
+            f.close()
+        else:
+            with open(f"fasta/{ leaf.node_name }/{ new_subseq_name }.fasta", "w") as f:
+                for subseq in subseqs:
+                    for refseq, seq in subseq.items():
+                        f.write(f">{ refseq }\n{ seq }\n")
+            f.close()
 
 
 def align_sequences(leaf):
@@ -495,25 +549,53 @@ def align_sequences(leaf):
     ])
 
 
+def align_sequences_mult_refseqs(leaf):
+    fasta_dir = f"fasta/{ leaf.node_name }"
+    aln_dir = f"aln/{ leaf.node_name }"
+    if not os.path.exists(aln_dir):
+        os.makedirs(aln_dir)
+    for fasta_file in os.listdir(fasta_dir):
+        aln_file = f"{ aln_dir }/{ fasta_file.replace('.fasta', '.aln') }"
+        subprocess.run([
+            "clustalo", "-i", f"{ fasta_dir }/{ fasta_file }",
+            "-o", aln_file,
+            "--threads", "50",
+            "--log", "clustalo.log",
+            "--verbose",
+            "--force"
+        ])
+
+
 def align_all_leaves_mult_refseq(tree):
-    print('teste')
     leaves_mult_refseq = get_leaves_multiple_refseq(tree)
     bar = Bar("Align multiple RefSeq species", max=len(leaves_mult_refseq))
     for leaf in leaves_mult_refseq:
         write_leaf_mult_refseqs_fasta(leaf)
         align_sequences(leaf)
         bar.next()
-        # remove_fasta_files(leaf)
     bar.finish()
 
 
-def remove_fasta_files(leaf):
-    pathlib.Path.unlink(f"{ leaf.node_name }.fasta")
-    # pathlib.Path.unlink(f"{ species.node_name }.aln")
+def align_all_leaves_mult_refseqs(tree):
+    leaves_mult_refseq = get_leaves_multiple_refseq(tree)
+    bar = Bar("Align multiple RefSeq species", max=len(leaves_mult_refseq))
+    for leaf in leaves_mult_refseq:
+        write_leaf_mult_refseqs_fastas(leaf)
+        align_sequences_mult_refseqs(leaf)
+        bar.next()
+    bar.finish()
 
 
-def extract_subseqs_from_aln(filename):
-    with open(f"{ filename }.aln") as f:
+def find_mutation_positions(reference_seq, seq):
+    mutations = {}
+    for i in range(len(reference_seq)):
+        if reference_seq[i] != seq[i]:
+            mutations[i] = seq[i]
+    return mutations
+
+
+def extract_mutations_from_aln(filename):
+    with open(f"aln/{ filename }.aln") as f:
         lines = f.readlines()
         subseqs = {}
         subseq = ""
@@ -530,50 +612,127 @@ def extract_subseqs_from_aln(filename):
             else:
                 subseq += lines[i].rstrip()
     f.close()
-    has_gap = False
-    for subseq_ref, seq in subseqs.items():
-        if "-" in seq:
-            has_gap = True
-            break
-    if not has_gap:
-        return {subseq_ref: subseqs[subseq_ref]}
-    else:
-        subseq_gaps = {}
-        for subseq_ref, seq in subseqs.items():
-            for i in range(0, len(seq), 512):
-                if "-" not in seq[i: i + 512]:
-                    consensus = True
-                    for subseq_ref_search, seq_search in subseqs.items():
-                        if subseq_ref_search == subseq_ref:
-                            continue
-                        if (seq[i: i + 512] != seq_search[i: i + 512]):
-                            consensus = False
-                            break
-                    if consensus:
-                        subseq_gaps[f"consensus.{i}"] = seq[i: i + 512]
-                    elif seq[i: i + 512] not in subseq_gaps.values():
-                        subseq_gaps[f"{subseq_ref}.{i}.no-consensus"] = seq[i: i + 512]
-                else:
-                    for subseq_ref_search, seq_search in subseqs.items():
-                        if subseq_ref_search == subseq_ref:
-                            continue
-                        if (
-                                "-" not in seq_search[i: i + 512] and
-                                seq_search[i: i + 512]
-                                not in subseq_gaps.values()
-                        ):
-                            subseq_gaps[
-                                f"{subseq_ref}.{i}.no-gap"
-                            ] = seq_search[i: i + 512]
-                            break
-                        if seq_search[i: i + 512] not in subseq_gaps.values():
-                            subseq_gaps[f"{subseq_ref}.{i}.no-gap_not-found"] = seq_search[i: i +
-                                                                          512].replace("-", "")
-        return subseq_gaps
+
+    mutations = {}
+    reference_refsq = list(subseqs.keys())[0]
+    reference_seq = subseqs[reference_refsq]
+    for seq_ref, seq in subseqs.items():
+        if seq_ref == reference_refsq:
+            continue
+        if seq != reference_seq:
+            seq_mutations = find_mutation_positions(reference_seq, seq)
+            mutations[seq_ref] = seq_mutations
+    return reference_seq, mutations
+
+
+def add_mutations_to_tree(tree):
+    new_tree = clone_tree(tree, Node)
+    for leaf in get_leaves_multiple_refseq(tree):
+        reference_seq, mutations = extract_mutations_from_aln(leaf.node_name)
+        copy_and_replace_nodes_from_tree_to_tree(
+            from_tree=tree,
+            to_tree=new_tree,
+            from_paths=[leaf.path_name],
+            to_paths=[leaf.path_name],
+            delete_children=True,
+            with_full_path=True,
+        )
+        if not mutations:
+            add_path_to_tree(
+                new_tree,
+                f"{ leaf.path_name }/genome",
+                node_attrs={
+                    "rank": "sequence",
+                    "seq": reference_seq,
+                },
+            )
+        else:
+            add_path_to_tree(
+                new_tree,
+                f"{ leaf.path_name }/genome",
+                node_attrs={
+                    "rank": "sequence",
+                    "seq": reference_seq,
+                    "mutations": mutations
+                },
+            )
+    return new_tree
+
+
+def replace_subseqs(tree):
+    new_tree = clone_tree(tree, Node)
+    all_leaves = []
+    all_genomes = find_attrs(tree, "rank", "genome")
+    for genome in all_genomes:
+        all_leaves.append(genome.parent)
+    all_leaves = set(all_leaves)
+    for leaf in all_leaves:
+        sequences = get_sequences_leaf_mult_refseq(leaf)
+        copy_and_replace_nodes_from_tree_to_tree(
+            from_tree=tree,
+            to_tree=new_tree,
+            from_paths=[leaf.path_name],
+            to_paths=[leaf.path_name],
+            delete_children=True,
+            with_full_path=True,
+        )
+        for seq_ref, seq in sequences.items():
+            add_path_to_tree(
+                new_tree,
+                f"{ leaf.path_name }/genome",
+                node_attrs={
+                    "rank": "sequence",
+                    "seq": seq,
+                },
+            )
+
+    return new_tree
+
+
+def get_multiple_subseqs_in_multiple_refseq(tree):
+    leaves_mult_refseq = get_leaves_multiple_refseq(tree)
+    multiple_subseqs = []
+    for leaf in leaves_mult_refseq:
+        genomes = find_attrs(leaf, "rank", "genome")
+        for genome in genomes:
+            if len(find_attrs(genome, "rank", "sequence")) > 1:
+                multiple_subseqs.append(leaf)
+                break
+    return multiple_subseqs
 
 
 tree = generate_seqs_by_taxon_tree()
-align_all_leaves_mult_refseq(tree)
+align_all_leaves_mult_refseqs(tree)
+
+
+# for leaf in multiple_subseqs_leafs:
+#     with open(f"aln/{ leaf.node_name }.aln") as f:
+#         lines = f.readlines()
+#         seqs_aln = {}
+#         seq = ""
+#         seq_ref = ""
+#         for i in range(len(lines)):
+#             if lines[i].startswith(">"):
+#                 if seq:
+#                     seqs_aln[seq_ref] = seq
+#                 seq_ref = lines[i].split()[0][1:]
+#                 seq = ""
+#             elif i == len(lines) - 1:
+#                 seq += lines[i].rstrip()
+#                 seqs_aln[seq_ref] = seq
+#             else:
+#                 seq += lines[i].rstrip()
+#     f.close()
+#     for seq_ref, aln_seq in seqs_aln.items():
+#         for node in find_attrs(leaf, "rank", "genome"):
+#             if node.node_name == seq_ref:
+#                 for subseq in find_attrs(node, "rank", "sequence"):
+#                     if '-' not in aln_seq:
+#                         print(aln_seq.index(subseq.get_attr("seq")))
+#                     break
+#             break
+#         break
+
 
 # def get_consensus_seq_species_mult_refseq(species):
 #   sequences = get_sequences_species_mult_refseq(species)
