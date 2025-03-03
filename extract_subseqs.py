@@ -1,4 +1,5 @@
 import math
+import re
 import os
 import random
 import subprocess
@@ -6,7 +7,11 @@ import sys
 import pathlib
 from progress.bar import Bar
 from Bio import Align
-
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 # import pandas as pd
 import taxoniq
 from bigtree import Node, add_path_to_tree, find_name, tree_to_newick, \
@@ -21,7 +26,7 @@ def all_equal(iterable):
     return next(g, True) and not next(g, False)
 
 
-KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
+KRAKEN_PATH = "/home/aschoier/workspace/kraken2"
 KRAKEN_DATABASE = "viral"
 
 
@@ -153,7 +158,9 @@ def generate_seqs_by_taxon_tree():
 
     num_genomes = get_num_genomes()
     visited_nodes = set()
+    registered_subseq_refs = set()
     bar = Bar("Loading taxon tree", max=num_genomes)
+    #print(f"Loading taxon tree", flush=True)
     for subdir, _, _ in file_tree:
         seq_ref = subdir.split("/")[-1]
         tax_id = tax_ids[seq_ref]
@@ -165,8 +172,14 @@ def generate_seqs_by_taxon_tree():
         for idx, ranked_taxon in enumerate(reversed(ranked_taxons)):
             slash = "" if path_parent_rank == "" else "/"
             path_parent_rank += slash + ranked_taxon.scientific_name
+            #print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
+            #print(f"Loading { path_parent_rank }", flush=True)
             if path_parent_rank in visited_nodes:
-                if idx == len(ranked_taxons) - 1:
+                already_added = True
+                for subseq_ref in sequences.keys():
+                    if subseq_ref not in registered_subseq_refs:
+                        already_added = False
+                if idx == len(ranked_taxons) - 1 and not already_added:
                     add_path_to_tree(
                         taxon_tree,
                         f"{ path_parent_rank }/{ seq_ref }",
@@ -182,6 +195,7 @@ def generate_seqs_by_taxon_tree():
                                 "seq": seq_list[1]
                             },
                         )
+                        registered_subseq_refs.add(subseq_ref)
                 else:
                     continue
             else:
@@ -198,7 +212,11 @@ def generate_seqs_by_taxon_tree():
                         path_parent_rank,
                         node_attrs={"rank": ranked_taxon.rank.name},
                     )
-                    if idx == len(ranked_taxons) - 1:
+                    already_added = True
+                    for subseq_ref in sequences.keys():
+                        if subseq_ref not in registered_subseq_refs:
+                            already_added = False
+                    if idx == len(ranked_taxons) - 1 and not already_added:
                         add_path_to_tree(
                             taxon_tree,
                             f"{ path_parent_rank }/{ seq_ref }",
@@ -217,6 +235,7 @@ def generate_seqs_by_taxon_tree():
                                     "seq_name": seq_list[0]
                                 },
                             )
+                            registered_subseq_refs.add(subseq_ref)
         bar.next()
     bar.finish()
     return taxon_tree
@@ -443,6 +462,8 @@ def get_leaves_multiple_refseq(tree):
     leaves_mult_refseq = []
     for leaf in all_leaves:
         if len(find_attrs(leaf, "rank", "genome")) > 1:
+            print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
+            print(f"{ leaf.node_name } has more than one RefSeq", flush=True)
             leaves_mult_refseq.append(leaf)
     return leaves_mult_refseq
 
@@ -491,10 +512,6 @@ def write_leaf_mult_refseqs_fastas(leaf):
                 fasta_subseqs[subseq_list[0]] = []
             fasta_subseqs[subseq_list[0]].append({refseq: subseq_list[1]})
 
-    # should consider same subseq_name if all subseq_name fastas
-    # contains only one sequence, each of a different refseq and all
-    # subseq_names contains strain, phage, isolate or one or
-    # more of them contains clone or isolate
     merge_subseqs = False
     keywords_merge = ["strain", "phage", "isolate", "clone", "complete", "partial"]
     compare_subseqref = None
@@ -518,6 +535,8 @@ def write_leaf_mult_refseqs_fastas(leaf):
 
     for subseq_name, subseqs in fasta_subseqs.items():
         new_subseq_name = subseq_name.replace('/', '-')
+        print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
+        print(f"writing fasta for { leaf.node_name }/{ new_subseq_name }", flush=True)
         if len(new_subseq_name) > 200:
             file_too_long += 1
             with open(f"fasta/{ leaf.node_name }/name_too_long{ file_too_long }", "w") as f:
@@ -534,6 +553,68 @@ def write_leaf_mult_refseqs_fastas(leaf):
                     for refseq, seq in subseq.items():
                         f.write(f">{ refseq }\n{ seq }\n")
             f.close()
+
+
+def get_leaves_multiple_differentiative(tree):
+    differentiative_words = ['DNA', 'RNA', 'VP', 'NSP', 'VD', 'PB', '(PB', 'B_', 'II_', '(M.CviS',
+        'contig', 'Contig', 'Circle', 'dsRNA', 'Maloyas', 'Diaz', 'Limbo', 'Poko', 'Forest', 'Juan']
+    keywords_merge = ["strain", "phage", "isolate", "clone", "variant"]
+    multiple_differentiative_leaves = []
+    for leaf in find_attrs(tree, "rank", "genome"):
+        if len(find_attrs(leaf, "rank", "sequence")) > 1:
+            seq_names = {}
+            for seq in find_attrs(leaf, "rank", "sequence"):
+                seq_names[seq.node_name] = seq.get_attr("seq_name")
+            checked_refs = set()
+            diff_words = {}
+            for seq_ref_a, seq_name_a in seq_names.items():
+                for seq_ref_b, seq_name_b in seq_names.items():
+                    if seq_ref_a in checked_refs and seq_ref_b in checked_refs:
+                        continue
+                    checked_refs.add(seq_ref_b)
+                    diff = set(seq_name_a.split()) ^ set(seq_name_b.split())
+                    for difference in diff:
+                        differentiative = False
+                        for word in differentiative_words:
+                            if difference.startswith(word):
+                                differentiative = True
+                        if difference in seq_name_b.split():
+                            prev_diff = seq_name_b.split()[seq_name_b.split().index(difference) - 1]
+                        elif difference in seq_name_a.split():
+                            prev_diff = seq_name_a.split()[seq_name_a.split().index(difference) - 1]
+                        if prev_diff in keywords_merge and not differentiative:
+                            if prev_diff in diff_words.keys():
+                                diff_words[prev_diff].append(difference)
+                            else:
+                                diff_words[prev_diff] = [difference]
+            if len(diff_words) == 1 and len(next(iter(diff_words.values()))) == len(seq_names):
+                multiple_differentiative_leaves.append(leaf)
+    return multiple_differentiative_leaves
+
+
+def write_leaves_multiple_differentiative(tree):
+    multiple_differentiative_leaves = get_leaves_multiple_differentiative(tree)
+    for leaf in multiple_differentiative_leaves:
+        write_leaf_multiple_differentiative(leaf)
+
+
+def align_leaves_multiple_differentiative(tree):
+    multiple_differentiative_leaves = get_leaves_multiple_differentiative(tree)
+    for leaf in multiple_differentiative_leaves:
+        align_sequences_multiple_differentiative(leaf)
+
+
+def write_leaf_multiple_differentiative(leaf):
+    fasta_dir = f"fasta/{ leaf.node_name }"
+    if not os.path.exists(fasta_dir):
+        os.makedirs(fasta_dir)
+    seqs = {}
+    for seq in find_attrs(leaf, "rank", "sequence"):
+        seqs[seq.node_name] = seq.get_attr("seq")
+        with open(f"{ fasta_dir }/{ leaf.node_name }.fasta", "w") as f:
+            for refseq, seq in seqs.items():
+                f.write(f">{ refseq }\n{ seq }\n")
+        f.close()
 
 
 def align_sequences(leaf):
@@ -556,6 +637,8 @@ def align_sequences_mult_refseqs(leaf):
         os.makedirs(aln_dir)
     for fasta_file in os.listdir(fasta_dir):
         aln_file = f"{ aln_dir }/{ fasta_file.replace('.fasta', '.aln') }"
+        print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
+        print(f"aligning { aln_dir }/{ fasta_file.replace('.fasta', '.aln') }", flush=True)
         subprocess.run([
             "clustalo", "-i", f"{ fasta_dir }/{ fasta_file }",
             "-o", aln_file,
@@ -564,6 +647,22 @@ def align_sequences_mult_refseqs(leaf):
             "--verbose",
             "--force"
         ])
+
+
+def align_sequences_multiple_differentiative(leaf):
+    fasta_dir = f"fasta/{ leaf.node_name }"
+    aln_dir = f"aln/{ leaf.node_name }"
+    if not os.path.exists(aln_dir):
+        os.makedirs(aln_dir)
+    aln_file = f"{ aln_dir }/{ leaf.node_name }.aln"
+    subprocess.run([
+        "clustalo", "-i", f"{ fasta_dir }/{ leaf.node_name }.fasta",
+        "-o", aln_file,
+        "--threads", "50",
+        "--log", "clustalo.log",
+        "--verbose",
+        "--force"
+    ])
 
 
 def align_all_leaves_mult_refseq(tree):
@@ -594,8 +693,8 @@ def find_mutation_positions(reference_seq, seq):
     return mutations
 
 
-def extract_mutations_from_aln(filename):
-    with open(f"aln/{ filename }.aln") as f:
+def extract_mutations_from_aln(folder, filename):
+    with open(f"aln/{ folder }/{ filename }.aln") as f:
         lines = f.readlines()
         subseqs = {}
         subseq = ""
@@ -702,72 +801,4 @@ def get_multiple_subseqs_in_multiple_refseq(tree):
 
 
 tree = generate_seqs_by_taxon_tree()
-align_all_leaves_mult_refseqs(tree)
-
-
-# for leaf in multiple_subseqs_leafs:
-#     with open(f"aln/{ leaf.node_name }.aln") as f:
-#         lines = f.readlines()
-#         seqs_aln = {}
-#         seq = ""
-#         seq_ref = ""
-#         for i in range(len(lines)):
-#             if lines[i].startswith(">"):
-#                 if seq:
-#                     seqs_aln[seq_ref] = seq
-#                 seq_ref = lines[i].split()[0][1:]
-#                 seq = ""
-#             elif i == len(lines) - 1:
-#                 seq += lines[i].rstrip()
-#                 seqs_aln[seq_ref] = seq
-#             else:
-#                 seq += lines[i].rstrip()
-#     f.close()
-#     for seq_ref, aln_seq in seqs_aln.items():
-#         for node in find_attrs(leaf, "rank", "genome"):
-#             if node.node_name == seq_ref:
-#                 for subseq in find_attrs(node, "rank", "sequence"):
-#                     if '-' not in aln_seq:
-#                         print(aln_seq.index(subseq.get_attr("seq")))
-#                     break
-#             break
-#         break
-
-
-# def get_consensus_seq_species_mult_refseq(species):
-#   sequences = get_sequences_species_mult_refseq(species)
-#   TACCACAGGTTACGCTGAGTTATTTT
-#   TACCACAGGTTACGCTGAGTTATTTT
-
-
-# viral_seqs = get_sequences()
-
-# seq_ref_lens = {}
-# for taxid, seq_refs in viral_seqs["phylum"].items():
-#     num_seq_refs = len(seq_refs)
-#     total_len = 0
-#     for subseq_refs in seq_refs.values():
-#         for subseq in subseq_refs.values():
-#             total_len += len(subseq)
-#     print(taxid, num_seq_refs, total_len)
-
-
-# for rank, taxids in viral_seqs.items():
-# print(rank)
-# print(len(taxids))
-# biggest = 0
-# biggest_taxid = None
-# smallest = 99999999999
-# smallest_taxid = None
-# for taxid, seq_refs in taxids.items():
-# total_len = sum(len(val) for val in [subseq for subseq in seq_refs.values()])
-# if total_len > biggest:
-# biggest = total_len
-# biggest_taxid = taxid
-# if total_len < smallest:
-# smallest = total_len
-# smallest_taxid = taxid
-# print(biggest_taxid, biggest)
-# print(smallest_taxid, smallest)
-
-# write_csv()
+align_leaves_multiple_differentiative(tree)
