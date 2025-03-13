@@ -3,15 +3,16 @@ import os
 import random
 import subprocess
 import sys
+import multiprocessing
 from progress.bar import Bar
-from datetime import datetime
+from typing import Dict, List, Set, Tuple
+# from datetime import datetime
 # import pandas as pd
-from zoneinfo import ZoneInfo
+# from zoneinfo import ZoneInfo
 import taxoniq
 from bigtree import Node, add_path_to_tree, \
     find_attrs, clone_tree, \
     copy_and_replace_nodes_from_tree_to_tree
-import collections
 
 
 KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
@@ -101,11 +102,11 @@ def get_complement(seq):
     return "".join([complementary_bases[i] for i in seq])[::-1]
 
 
-def get_tax_id(seq_ref):
+def get_tax_id(ref_seq):
     with open(f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/seqid2taxid.map") as f:
         for line in f.readlines():
             # kraken:taxid|687377|NC_002195.1 687377
-            if line.rstrip().split("|")[-1].split()[0] == seq_ref:
+            if line.rstrip().split("|")[-1].split()[0] == ref_seq:
                 tax_id = int(line.split("|")[-1].split()[-1])
                 break
     f.close()
@@ -117,9 +118,9 @@ def get_tax_ids():
     tax_ids = {}
     with open(f"{ KRAKEN_PATH }/{ KRAKEN_DATABASE }/seqid2taxid.map") as f:
         for line in f.readlines():
-            seq_ref = line.rstrip().split("|")[-1].split()[0]
+            ref_seq = line.rstrip().split("|")[-1].split()[0]
             tax_id = int(line.rstrip().split("|")[-1].split()[-1])
-            tax_ids[seq_ref] = tax_id
+            tax_ids[ref_seq] = tax_id
     f.close()
 
     return tax_ids
@@ -136,7 +137,10 @@ def get_num_refseq_files():
     )
 
 
-def generate_seqs_by_taxon_tree():
+def generate_seqs_by_taxon_tree() -> Node:
+    """Return hierarchical taxon tree according to Taxoniq NCBI taxonomy
+    containing ref_seq kraken2 files' sequences, branching them on
+    subref_seqs leaves."""
     taxon_tree = Node("root")
     gen_dir = f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes"
     tax_ids = get_tax_ids()
@@ -150,10 +154,10 @@ def generate_seqs_by_taxon_tree():
     bar = Bar("Loading taxon tree", max=num_refseq_files)
     # print(f"Loading taxon tree", flush=True)
     for subdir, _, _ in file_tree:
-        seq_ref = subdir.split("/")[-1]
-        tax_id = tax_ids[seq_ref]
+        ref_seq = subdir.split("/")[-1]
+        tax_id = tax_ids[ref_seq]
 
-        sequences = get_genome_sequences(seq_ref)
+        sequences = get_genome_sequences(ref_seq)
         t = taxoniq.Taxon(tax_id)
         ranked_taxons = t.ranked_lineage
         path_parent_rank = ""
@@ -170,13 +174,13 @@ def generate_seqs_by_taxon_tree():
                 if idx == len(ranked_taxons) - 1 and not already_added:
                     add_path_to_tree(
                         taxon_tree,
-                        f"{ path_parent_rank }/{ seq_ref }",
-                        node_attrs={"rank": "genome"},
+                        f"{ path_parent_rank }/{ ref_seq }",
+                        node_attrs={"rank": "ref_seq"},
                     )
                     for subseq_ref, seq_list in sequences.items():
                         add_path_to_tree(
                             taxon_tree,
-                            f"{ path_parent_rank }/{ seq_ref }/{ subseq_ref }",
+                            f"{ path_parent_rank }/{ ref_seq }/{ subseq_ref }",
                             node_attrs={
                                 "rank": "sequence",
                                 "seq_name": seq_list[0],
@@ -207,15 +211,15 @@ def generate_seqs_by_taxon_tree():
                     if idx == len(ranked_taxons) - 1 and not already_added:
                         add_path_to_tree(
                             taxon_tree,
-                            f"{ path_parent_rank }/{ seq_ref }",
+                            f"{ path_parent_rank }/{ ref_seq }",
                             node_attrs={
-                                "rank": "genome",
+                                "rank": "ref_seq",
                             },
                         )
                         for subseq_ref, seq_list in sequences.items():
                             add_path_to_tree(
                                 taxon_tree,
-                                f"{ path_parent_rank }/{ seq_ref }/" +
+                                f"{ path_parent_rank }/{ ref_seq }/" +
                                 f"{ subseq_ref }",
                                 node_attrs={
                                     "rank": "sequence",
@@ -229,18 +233,13 @@ def generate_seqs_by_taxon_tree():
     return taxon_tree
 
 
-def get_genome_size(sequences):
-    total_len = 0
-    for seq in sequences.values():
-        total_len += len(seq)
-    return total_len
-
-
-def get_genome_sequences(seq_ref):
+def get_genome_sequences(ref_seq: str) -> Dict:
+    """Return dict of subseq_ref sequences retrieved from
+    kraken2 genome fasta file identified by ref_seq."""
     sequences = {}
     # >NC_019947.1 Tomato yellow mottle virus segment DNA-B, complete sequence
     with open(
-        f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes/{seq_ref}/genome.fna"
+        f"{KRAKEN_PATH}/{KRAKEN_DATABASE}/genomes/{ref_seq}/genome.fna"
     ) as f:
         lines = f.readlines()
         subseq = None
@@ -353,114 +352,145 @@ def get_subseqs(rank, seqs, seq_len_spec={}, n=100, min_len=100, max_len=512):
 #     print("Done!")
 
 
-def get_leaves_multiple_refseq(tree):
-    all_leaves = []
-    all_genomes = find_attrs(tree, "rank", "genome")
-    for genome in all_genomes:
-        all_leaves.append(genome.parent)
-    all_leaves = set(all_leaves)
-    leaves_mult_refseq = []
-    for leaf in all_leaves:
-        if len(find_attrs(leaf, "rank", "genome")) > 1:
-            print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
-            print(f"{ leaf.node_name } has more than one RefSeq", flush=True)
-            leaves_mult_refseq.append(leaf)
-    return leaves_mult_refseq
+def get_final_taxon_nodes_multiple_refseq(tree: Node) -> List:
+    """Return list of final taxon nodes from a taxon tree containing
+    more than one ref_seq."""
+    all_final_taxon_nodes = []
+    all_ref_seq_nodes = find_attrs(tree, "rank", "ref_seq")
+    for ref_seq_node in all_ref_seq_nodes:
+        all_final_taxon_nodes.append(ref_seq_node.parent)
+    all_final_taxon_nodes = set(all_final_taxon_nodes)
+    final_taxon_nodes_mult_refseq = []
+    for leaf in all_final_taxon_nodes:
+        if len(find_attrs(leaf, "rank", "ref_seq")) > 1:
+            final_taxon_nodes_mult_refseq.append(leaf)
+    return final_taxon_nodes_mult_refseq
 
 
-def get_subsequences_leaf_mult_refseq(leaf):
+def final_taxon_node_to_dict_subseqs(final_taxon_node: Node) -> Dict:
+    """Return the dict: {
+    ref_seq:{subseq_ref_seq:
+        {seq_name: subseq_name, seq: subseq}, ...}, ...}
+    of a given final taxon node.
+    """
     sequences = {}
-    for refseq in find_attrs(leaf, "rank", "genome"):
-        sequence = {}
-        for subseq in find_attrs(refseq, "rank", "sequence"):
-            sequence[subseq.node_name] = [
-                subseq.get_attr("seq_name"), subseq.get_attr("seq")]
-        sequences[refseq.node_name] = sequence
+    for ref_seq_node in find_attrs(final_taxon_node, "rank", "ref_seq"):
+        ref_seq = ref_seq_node.node_name
+        subseq_dict = {}
+        for subseq_node in find_attrs(ref_seq_node, "rank", "sequence"):
+            subseq_ref_seq = subseq_node.node_name
+            subseq_dict[subseq_ref_seq] = {
+                "seq_name": subseq_node.get_attr("seq_name"),
+                "seq": subseq_node.get_attr("seq")}
+        sequences[ref_seq] = subseq_dict
     return sequences
 
 
-def write_leaf_mult_refseqs_fastas(leaf):
-    leaf_name = leaf.node_name
-    if not os.path.exists(f"fasta/{ leaf_name }"):
-        os.makedirs(f"fasta/{ leaf_name }")
-
-    file_too_long = 0
-    sequences = get_subsequences_leaf_mult_refseq(leaf)
+def get_dict_fasta_subseqs(final_taxon_node: Node) -> Dict:
+    """Return a dict grouping multiple ref_seq sequences in a final taxon node
+    by subseq name.
+    """
+    subseqs_dict = final_taxon_node_to_dict_subseqs(final_taxon_node)
     fasta_subseqs = {}
-    for refseq, subseqs in sequences.items():
-        for subseq_ref, subseq_list in subseqs.items():
-            if subseq_list[0] not in fasta_subseqs.keys():
-                fasta_subseqs[subseq_list[0]] = []
-            fasta_subseqs[subseq_list[0]].append({refseq: subseq_list[1]})
+    for ref_seq, subseqs in subseqs_dict.items():
+        for subseq_val in subseqs.values():
+            if subseq_val["seq_name"] not in fasta_subseqs.keys():
+                fasta_subseqs[subseq_val["seq_name"]] = []
+            fasta_subseqs[subseq_val["seq_name"]].append(
+                {ref_seq: subseq_val["seq"]})
+    return fasta_subseqs
+
+
+def handle_merge_mult_refseqs(final_taxon_node: Node) -> Dict:
+    """Return a dict merging groups of multiple ref_seq sequences
+    in a final taxon node that have only one sequence and contain
+    keywords in their name.
+    """
+    final_taxon_node_name = final_taxon_node.node_name
+    subseqs_dict = final_taxon_node_to_dict_subseqs(final_taxon_node)
+    fasta_subseqs = get_dict_fasta_subseqs(final_taxon_node)
 
     merge_subseqs = False
     keywords_merge = ["strain", "phage",
                       "isolate", "clone", "complete", "partial"]
-    compare_subseqref = None
+    compare_subseq_ref = None
     for subseq_name, subseqs in fasta_subseqs.items():
-        if merge_subseqs:
-            if compare_subseqref == list(subseqs[0].keys())[0]:
-                merge_subseqs = False
-        if (len(subseqs) == 1
-                and any(ext.lower() in subseq_name for ext in keywords_merge)):
-            compare_subseqref = list(subseqs[0].keys())[0]
-            merge_subseqs = True
+        for subseq in subseqs:
+            ref_seq = next(iter(subseq))
+            if merge_subseqs:
+                if compare_subseq_ref == ref_seq:
+                    merge_subseqs = False
+            if (len(subseqs) == 1
+                    and any(keyword in subseq_name
+                            for keyword in keywords_merge)):
+                compare_subseq_ref = ref_seq
+                merge_subseqs = True
 
     if merge_subseqs:
         new_fasta_subseqs = {}
-        new_fasta_subseqs[leaf_name] = []
-        for refseq, subseqs in sequences.items():
-            for subseq_ref, subseq_list in subseqs.items():
-                new_fasta_subseqs[leaf_name].append(
-                    {refseq: subseq_list[1]})
+        new_fasta_subseqs[final_taxon_node_name] = []
+        for ref_seq, subseqs in subseqs_dict.items():
+            for subseq_dict in subseqs.values():
+                new_fasta_subseqs[final_taxon_node_name].append(
+                    {ref_seq: subseq_dict["seq"]})
         fasta_subseqs = new_fasta_subseqs
+    return fasta_subseqs
 
+
+def write_final_taxon_node_mult_refseqs_fastas(final_taxon_node: Node) -> None:
+    """Write fasta files for multiple ref_seq final taxon node."""
+    final_taxon_node_name = final_taxon_node.node_name
+    if not os.path.exists(f"fasta/{ final_taxon_node_name }"):
+        os.makedirs(f"fasta/{ final_taxon_node_name }")
+
+    fasta_subseqs = handle_merge_mult_refseqs(final_taxon_node)
+
+    name_too_long = 0
     for subseq_name, subseqs in fasta_subseqs.items():
         new_subseq_name = subseq_name.replace('/', '-')
-        print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
-        print(
-            f"writing fasta for { leaf_name }/{ new_subseq_name }",
-            flush=True
-        )
         if len(new_subseq_name) > 200:
-            file_too_long += 1
+            name_too_long += 1
             with open(
-                f"fasta/{ leaf_name }/name_too_long{ file_too_long }",
+                f"fasta/{ final_taxon_node_name }/name_too_long"
+                f"{ name_too_long }",
                 "w"
             ) as f:
                 f.write(new_subseq_name)
             f.close()
             with open(
-                f"fasta/{ leaf_name }/name_too_long{ file_too_long }.fasta",
+                f"fasta/{ final_taxon_node_name }/name_too_long"
+                f"{ name_too_long }.fasta",
                 "w"
             ) as f:
                 for subseq in subseqs:
-                    for refseq, seq in subseq.items():
-                        f.write(f">{ refseq }\n{ seq }\n")
+                    for ref_seq, seq in subseq.items():
+                        f.write(f">{ ref_seq }\n{ seq }\n")
             f.close()
         else:
             with open(
-                f"fasta/{ leaf_name }/{ new_subseq_name }.fasta",
+                f"fasta/{ final_taxon_node_name }/{ new_subseq_name }.fasta",
                 "w"
             ) as f:
                 for subseq in subseqs:
-                    for refseq, seq in subseq.items():
-                        f.write(f">{ refseq }\n{ seq }\n")
+                    for ref_seq, seq in subseq.items():
+                        f.write(f">{ ref_seq }\n{ seq }\n")
             f.close()
 
 
-def get_leaves_multiple_differentiative(tree):
+def get_refseqs_multiple_differentiative(tree: Node) -> Dict:
+    """Return dict grouping sequences leaves that belong to the same ref_seq
+    in a taxon tree but are actually variants of the same taxon by keyword."""
     differentiative_words = ['DNA', 'RNA', 'VP', 'NSP', 'VD', 'PB', '(PB',
                              'B_', 'II_', '(M.CviS', 'contig', 'Contig',
                              'Circle', 'dsRNA', 'Maloyas', 'Diaz', 'Limbo',
                              'Poko', 'Forest', 'Juan']
     keywords_merge = ["strain", "phage", "isolate", "clone", "variant"]
     multiple_differentiative_leaves = {}
-    for leaf in find_attrs(tree, "rank", "genome"):
+    for leaf in find_attrs(tree, "rank", "ref_seq"):
         if len(find_attrs(leaf, "rank", "sequence")) > 1:
             seq_names = {}
-            for seq in find_attrs(leaf, "rank", "sequence"):
-                seq_names[seq.node_name] = seq.get_attr("seq_name")
+            for sequence_node in find_attrs(leaf, "rank", "sequence"):
+                seq_names[sequence_node.node_name] = sequence_node.get_attr("seq_name")
             checked_refs = []
             for seq_ref_a, seq_name_a in seq_names.items():
                 for seq_ref_b, seq_name_b in seq_names.items():
@@ -486,15 +516,19 @@ def get_leaves_multiple_differentiative(tree):
                             if prev_diff not in seq_name_b:
                                 continue
                         if prev_diff in keywords_merge and not differentiative:
-                            for seq in find_attrs(leaf, "rank", "sequence"):
-                                if seq.node_name == seq_ref_a:
+                            if leaf.node_name not in \
+                                    multiple_differentiative_leaves.keys():
+                                multiple_differentiative_leaves[
+                                    leaf.node_name] = {}
+
+                            for sequence_node in find_attrs(leaf,
+                                                            "rank", "sequence"):
+                                if sequence_node.node_name in [seq_ref_a,
+                                                               seq_ref_b]:
                                     add_set_to_dict(
-                                        multiple_differentiative_leaves,
-                                        leaf.node_name, seq)
-                                elif seq.node_name == seq_ref_b:
-                                    add_set_to_dict(
-                                        multiple_differentiative_leaves,
-                                        leaf.node_name, seq)
+                                        multiple_differentiative_leaves[
+                                            leaf.node_name],
+                                        prev_diff, sequence_node)
     return multiple_differentiative_leaves
 
 
@@ -505,88 +539,125 @@ def add_set_to_dict(dictionary, key, value):
         dictionary[key].add(value)
 
 
-def write_leaves_multiple_differentiative(tree):
-    multiple_differentiative_leaves = get_leaves_multiple_differentiative(tree)
-    for ref_seq, seqs in multiple_differentiative_leaves.items():
-        write_leaf_multiple_differentiative(ref_seq, seqs)
+def write_fasta_final_taxon_nodes_multiple_differentiative(tree: Node):
+    """Write fasta files of ref_seq nodes in a taxon tree containing variants
+    of the same taxon."""
+    multiple_differentiative_leaves = get_refseqs_multiple_differentiative(
+        tree)
+    for ref_seq, diffs in multiple_differentiative_leaves.items():
+        for prev_diff, seqs in diffs.items():
+            write_final_taxon_node_multiple_differentiative(
+                ref_seq, prev_diff, seqs)
 
 
-def align_leaves_multiple_differentiative(tree):
-    multiple_differentiative_leaves = get_leaves_multiple_differentiative(tree)
-    for ref_seq in multiple_differentiative_leaves.keys():
-        align_sequences_multiple_differentiative(ref_seq)
+def align_ref_seq_nodes_multiple_differentiative(
+        tree: Node, num_cores: int = None) -> None:
+    """Align fasta files of ref_seq nodes in a taxon tree containing variants
+    of the same taxon using num_cores processor cpu cores. All available
+    cpu cores are selected by default."""
+    multiple_differentiative_leaves = get_refseqs_multiple_differentiative(
+        tree)
+    for ref_seq, diffs in multiple_differentiative_leaves.items():
+        for prev_diff in diffs.keys():
+            if num_cores:
+                align_sequences_multiple_differentiative(ref_seq, prev_diff,
+                                                         num_cores)
+            else:
+                align_sequences_multiple_differentiative(ref_seq, prev_diff)
 
 
-def write_and_align_multiple_differentiative(tree):
-    write_leaves_multiple_differentiative(tree)
-    align_leaves_multiple_differentiative(tree)
+def write_and_align_multiple_differentiative(
+        tree: Node, num_cores: int = None) -> None:
+    """Write fasta files of ref_seq nodes in a taxon tree containing variants
+    of the same taxon and and align them using num_cores cpu processor cores.
+    All available cpu cores are selected by default."""
+    write_fasta_final_taxon_nodes_multiple_differentiative(tree)
+    align_ref_seq_nodes_multiple_differentiative(tree, num_cores)
 
 
-def write_leaf_multiple_differentiative(ref_seq, seqs):
+def write_final_taxon_node_multiple_differentiative(
+        ref_seq: str, seqs: List) -> None:
+    """Write fasta file containing seqs of ref_seq node in a taxon tree"""
     fasta_dir = f"fasta/{ ref_seq }"
     if not os.path.exists(fasta_dir):
         os.makedirs(fasta_dir)
-    print(f"writing fasta for { fasta_dir }/{ ref_seq }")
     with open(f"{ fasta_dir }/{ ref_seq }.fasta", "w") as f:
         for seq in seqs:
             f.write(f">{ seq.node_name }\n{ seq.get_attr('seq') }\n")
     f.close()
 
 
-def align_sequences_mult_refseqs(leaf):
-    fasta_dir = f"fasta/{ leaf.node_name }"
-    aln_dir = f"aln/{ leaf.node_name }"
+def align_sequences_mult_refseqs(
+        final_taxon_node: Node,
+        num_cores: int = multiprocessing.cpu_count()) -> None:
+    """Align fasta files of final_taxon_node in a taxon tree containing
+    more than one ref_seq using num_cores processor cpu cores. All available
+    cpu cores are selected by default."""
+    fasta_dir = f"fasta/{ final_taxon_node.node_name }"
+    aln_dir = f"aln/{ final_taxon_node.node_name }"
     if not os.path.exists(aln_dir):
         os.makedirs(aln_dir)
     for fasta_file in os.listdir(fasta_dir):
         aln_file = f"{ aln_dir }/{ fasta_file.replace('.fasta', '.aln') }"
-        print(datetime.now(ZoneInfo("America/Sao_Paulo")), flush=True)
-        print(
-            f"aligning { aln_dir }/{ fasta_file.replace('.fasta', '.aln') }",
-            flush=True
-        )
         subprocess.run([
             "clustalo", "-i", f"{ fasta_dir }/{ fasta_file }",
             "-o", aln_file,
-            "--threads", "50",
+            "--threads", f"{ num_cores }",
             "--log", "clustalo.log",
             "--verbose",
             "--force"
         ])
 
 
-def align_sequences_multiple_differentiative(ref_seq):
-    fasta_dir = f"fasta/{ ref_seq }"
-    aln_dir = f"aln/{ ref_seq }"
+def align_sequences_multiple_differentiative(
+        ref_seq: str,
+        prev_diff: str,
+        num_cores: int = multiprocessing.cpu_count()
+        ) -> None:
+    """Align fasta file of ref_seq node in a taxon tree variants
+    of the same taxon using num_cores processor cpu cores. All available
+    cpu cores are selected by default."""
+    fasta_dir = f"fasta/{ ref_seq }/{ prev_diff}"
+    aln_dir = f"aln/{ ref_seq }/{ prev_diff }"
     if not os.path.exists(aln_dir):
         os.makedirs(aln_dir)
-    aln_file = f"{ aln_dir }/{ ref_seq }.aln"
-    print(f"aligning { aln_dir }/{ ref_seq }")
+    aln_file = f"{ aln_dir }/{ ref_seq }/{ prev_diff }.aln"
     subprocess.run([
-        "clustalo", "-i", f"{ fasta_dir }/{ ref_seq }.fasta",
+        "clustalo", "-i", f"{ fasta_dir }/{ ref_seq }/{ prev_diff }.fasta",
         "-o", aln_file,
-        "--threads", "50",
+        "--threads", f"{ num_cores }",
         "--log", "clustalo.log",
         "--verbose",
         "--force"
     ])
 
 
-def align_all_leaves_mult_refseqs(tree):
-    leaves_mult_refseq = get_leaves_multiple_refseq(tree)
-    bar = Bar("Align multiple RefSeq species", max=len(leaves_mult_refseq))
-    for leaf in leaves_mult_refseq:
-        write_leaf_mult_refseqs_fastas(leaf)
-        align_sequences_mult_refseqs(leaf)
+def align_all_final_final_taxon_nodes_mult_refseqs(
+        tree: Node, num_cores: int = None) -> None:
+    """Write fasta files of final_taxon_nodes in a taxon tree containing
+    more than one ref_seq and align them using num_cores processor cpu cores.
+    All available cpu cores are selected by default."""
+    final_taxon_nodes_mult_refseq = get_final_taxon_nodes_multiple_refseq(tree)
+    bar = Bar("Align multiple RefSeq final taxon nodes",
+              max=len(final_taxon_nodes_mult_refseq))
+    for final_taxon_node in final_taxon_nodes_mult_refseq:
+        write_final_taxon_node_mult_refseqs_fastas(final_taxon_node)
+        if num_cores:
+            align_sequences_mult_refseqs(final_taxon_node, num_cores)
+        else:
+            align_sequences_mult_refseqs(final_taxon_node)
         bar.next()
     bar.finish()
 
 
-def find_mutation_positions(reference_seq, seq):
+def find_mutation_positions(
+        reference_sequence: str, compare_sequence: str) -> Dict:
+    """Return dict containing mutation position as key
+    and mutation as value."""
     mutations = {}
-    for i in range(len(reference_seq)):
-        if reference_seq[i] != seq[i]:
-            mutations[i] = seq[i]
+    for i in range(len(reference_sequence)):
+        if reference_sequence[i] != compare_sequence[i]:
+            mutations[i] = compare_sequence[i]
 
     point_indel_mutations = {}
     indel_start = None
@@ -602,10 +673,12 @@ def find_mutation_positions(reference_seq, seq):
             if pos + 1 not in mutations.keys():
                 indel_start = None
 
-    return mutations
+    return point_indel_mutations
 
 
-def extract_mutations_from_aln(folder, filename):
+def extract_mutations_from_aln(folder: str, filename: str) -> Tuple[str, Dict]:
+    """Return reference sequence and a mutation dict containing ref_seq as key
+    and mutations dict as value."""
     with open(f"aln/{ folder }/{ filename }.aln") as f:
         lines = f.readlines()
         subseqs = {}
@@ -626,80 +699,82 @@ def extract_mutations_from_aln(folder, filename):
 
     mutations = {}
     min_dash = 999999999
-    for seq_ref, seq in subseqs.items():
+    for ref_seq, seq in subseqs.items():
         if seq.count("-") < min_dash:
             min_dash = seq.count("-")
-            reference_refsq = seq_ref
-            reference_seq = subseqs[reference_refsq]
-    for seq_ref, seq in subseqs.items():
-        if seq_ref == reference_refsq:
+            reference_refsq = ref_seq
+            reference_sequence = subseqs[reference_refsq]
+    for ref_seq, compare_sequence in subseqs.items():
+        if ref_seq == reference_refsq:
             continue
-        if seq != reference_seq:
-            seq_mutations = find_mutation_positions(reference_seq, seq)
-            mutations[seq_ref] = seq_mutations
-    return reference_seq, mutations
+        if compare_sequence != reference_sequence:
+            seq_mutations = find_mutation_positions(
+                reference_sequence, compare_sequence)
+            mutations[ref_seq] = seq_mutations
+    return reference_sequence, mutations
 
 
-def add_mutations_multiple_refseq_to_tree(tree):
+def add_mutations_multiple_refseq_to_tree(tree: Node) -> Node:
     new_tree = clone_tree(tree, Node)
-    for leaf in get_leaves_multiple_refseq(tree):
+    """Return taxon tree substituting """
+    for final_taxon_node in get_final_taxon_nodes_multiple_refseq(tree):
         add_path_to_tree(
             new_tree,
-            f"{ leaf.path_name }/genome",
+            f"{ final_taxon_node.path_name }/ref_seq",
             node_attrs={
-                "rank": "genome",
+                "rank": "ref_seq",
             },
         )
         for aln_file in [
             os.path.splitext(f)[0]
-            for f in os.listdir(f"aln/{ leaf.node_name }")
+            for f in os.listdir(f"aln/{ final_taxon_node.node_name }")
             if os.path.isfile(f)
         ]:
-            reference_seq, mutations = extract_mutations_from_aln(
-                leaf.node_name, aln_file)
+            reference_sequence, mutations = extract_mutations_from_aln(
+                final_taxon_node.node_name, aln_file)
             copy_and_replace_nodes_from_tree_to_tree(
                 from_tree=tree,
                 to_tree=new_tree,
-                from_paths=[leaf.path_name],
-                to_paths=[leaf.path_name],
+                from_paths=[final_taxon_node.path_name],
+                to_paths=[final_taxon_node.path_name],
                 delete_children=True,
                 with_full_path=True,
             )
             if not mutations:
                 add_path_to_tree(
                     new_tree,
-                    f"{ leaf.path_name }/genome/{ aln_file }",
+                    f"{ final_taxon_node.path_name }/ref_seq/{ aln_file }",
                     node_attrs={
                         "rank": "sequence",
-                        "seq": reference_seq
+                        "seq": reference_sequence
                     },
                 )
             else:
                 add_path_to_tree(
                     new_tree,
-                    f"{ leaf.path_name }/genome/{ aln_file }",
+                    f"{ final_taxon_node.path_name }/ref_seq/{ aln_file }",
                     node_attrs={
                         "rank": "sequence",
-                        "seq": reference_seq,
+                        "seq": reference_sequence,
                         "mutations": mutations
                     },
                 )
     return new_tree
 
 
-def add_mutations_multiple_differentiative_to_tree(tree):
+def add_mutations_multiple_differentiative_to_tree(tree: Node) -> Node:
     new_tree = clone_tree(tree, Node)
-    genomes = find_attrs(tree, "rank", "genome")
-    for ref_seq in get_leaves_multiple_differentiative(tree).keys():
-        for gen in genomes:
-            if gen.node_name == ref_seq:
-                leaf = gen
-                parent = gen.parent
+    all_ref_seq_nodes = find_attrs(tree, "rank", "ref_seq")
+    for ref_seq in get_refseqs_multiple_differentiative(tree).keys():
+        for ref_seq_node in all_ref_seq_nodes:
+            if ref_seq_node.node_name == ref_seq:
+                target_node = ref_seq_node
+                parent = ref_seq_node.parent
         add_path_to_tree(
             new_tree,
             f"{ parent.path_name }/{ ref_seq }",
             node_attrs={
-                "rank": "genome",
+                "rank": "ref_seq",
             },
         )
         for aln_file in [
@@ -707,283 +782,195 @@ def add_mutations_multiple_differentiative_to_tree(tree):
             for f in os.listdir(f"aln/{ ref_seq }")
             if os.path.isfile(f)
         ]:
-            reference_seq, mutations = extract_mutations_from_aln(
+            reference_sequence, mutations = extract_mutations_from_aln(
                 ref_seq, aln_file)
             copy_and_replace_nodes_from_tree_to_tree(
                 from_tree=tree,
                 to_tree=new_tree,
-                from_paths=[leaf.path_name],
-                to_paths=[leaf.path_name],
+                from_paths=[target_node.path_name],
+                to_paths=[target_node.path_name],
                 delete_children=True,
                 with_full_path=True,
             )
             if not mutations:
                 add_path_to_tree(
                     new_tree,
-                    f"{ leaf.path_name }/genome/{ aln_file }",
+                    f"{ target_node.path_name }/ref_seq/{ aln_file }",
                     node_attrs={
                         "rank": "sequence",
-                        "seq": reference_seq
+                        "seq": reference_sequence
                     },
                 )
             else:
                 add_path_to_tree(
                     new_tree,
-                    f"{ leaf.path_name }/genome/{ aln_file }",
+                    f"{ target_node.path_name }/ref_seq/{ aln_file }",
                     node_attrs={
                         "rank": "sequence",
-                        "seq": reference_seq,
+                        "seq": reference_sequence,
                         "mutations": mutations
                     },
                 )
     return new_tree
 
 
-def get_multiple_subseqs_in_multiple_refseq(tree):
-    leaves_mult_refseq = get_leaves_multiple_refseq(tree)
-    multiple_subseqs = []
-    for leaf in leaves_mult_refseq:
-        genomes = find_attrs(leaf, "rank", "genome")
-        for genome in genomes:
-            if len(find_attrs(genome, "rank", "sequence")) > 1:
-                multiple_subseqs.append(leaf)
-                break
-    return multiple_subseqs
+def extract_max_subseqs(final_taxon_node: Node, window_size: int) -> Set:
+    max_subseqs = set()
+    seqs = find_attrs(final_taxon_node, "rank", "sequence")
 
-
-def get_maximum_extract_subseqs(leaf, min_subseq_len):
-    sequences = find_attrs(leaf, "rank", "sequence")
-    max_subseqs = 0
-    for seq in sequences:
-        seq_len = len(seq.get_attr("seq"))
-        if seq_len >= min_subseq_len:
-            max_subseqs += seq_len - min_subseq_len
-        if seq.get_attr("mutations") is None:
-            seq.set_attrs({"max_subseqs": max_subseqs})
+    for sequence_node in seqs:
+        sequence = sequence_node.get_attr("seq")
+        mutations = sequence_node.get_attr("mutations")
+        if mutations:
+            add_seqs = get_mutation_subseqs(sequence, window_size, mutations)
+            for seq in add_seqs:
+                max_subseqs.add(seq)
         else:
-            point_mutations = {}
-            indels = {}
-            seq_ref_mutations = seq.get_attr("mutations")
-            for seq_ref, mutations in seq_ref_mutations.items():
-                seq_ref_point_mutations = {}
-                seq_ref_indels = {}
-                for pos, mut in mutations.items():
-                    if (not pos - 1 in mutations.keys() and
-                            not pos + 1 in mutations.keys()):
-                        seq_ref_point_mutations[pos] = mut
-                    else:
-                        seq_ref_indels[pos] = mut
-                point_mutations[seq_ref] = seq_ref_point_mutations
-                indels[seq_ref] = seq_ref_indels
-            max_subseqs += extract_max_subseqs_mutations(
-                point_mutations, indels, min_subseq_len)
-
-
-def get_mutations_inside_window(seq_ref_mutations, window_size):
-    window_groups = {}
-    for seq_ref, mutations in seq_ref_mutations.items():
-        checked_pos = []
-        window_groups[seq_ref] = {}
-        for pos_a, mut_a in mutations.items():
-            for pos_b, mut_b in mutations.items():
-                if pos_a == pos_b:
-                    continue
-                if {pos_a, pos_b} in checked_pos:
-                    continue
-                else:
-                    checked_pos.append({pos_a, pos_b})
-                if abs(pos_a - pos_b) <= window_size:
-                    if pos_a not in window_groups[seq_ref].keys():
-                        window_groups[seq_ref][pos_a] = {pos_a: mut_a,
-                                                         pos_b: mut_b}
-                    else:
-                        window_groups[seq_ref][pos_a][pos_b] = mut_b
-    return window_groups
-
-
-def get_window_group_score(window_group, window_size):
-    all_gap = True
-    ordered_mutation_keys = sorted(window_group.keys())
-    for mutation in window_group.values():
-        if mutation != '-':
-            all_gap = False
-            break
-    if all_gap:
-        gap_groups = {}
-        for index_pos in range(len(ordered_mutation_keys)):
-            if index_pos <= len(ordered_mutation_keys) - 1:
-                if ordered_mutation_keys[index_pos + 1] - \
-                   ordered_mutation_keys[index_pos] == 1:
-                    if ordered_mutation_keys[index_pos] \
-                            not in gap_groups.keys():
-                        gap_groups[ordered_mutation_keys[index_pos]] = [
-                            ordered_mutation_keys[index_pos]]
-                    gap_groups[ordered_mutation_keys[index_pos]].append(
-                        ordered_mutation_keys[index_pos + 1])
-                else:
-                    gap_groups[ordered_mutation_keys[index_pos]] = [
-                        ordered_mutation_keys[index_pos]]
-        gaps = {}
-        num_gaps = 0
-        for gap_start, gap_list in gap_groups.items():
-            gap_end = max(gap_list)
-            gaps[gap_start] = gap_end
-            num_gaps += 1
-        discount = 0
-        prev_end = None
-        for gap_start, gap_end in gaps.items():
-            if prev_end:
-                discount += gap_start - prev_end
-            prev_end = gap_end
-
-        return ((window_size - 1) * num_gaps) - discount
-
-    else:
-        biggest_index = -1
-        mutation = '-'
-        while (mutation == '-' and
-                biggest_index > -len(window_group)):
-            biggest_mutation_key = ordered_mutation_keys[biggest_index]
-            mutation = window_group[biggest_mutation_key]
-            biggest_index -= 1
-        smallest_index = 0
-        mutation = '-'
-        while (mutation == '-' and
-                smallest_index < len(window_group)):
-            smallest_mutation_key = ordered_mutation_keys[smallest_index]
-            mutation = window_group[smallest_mutation_key]
-            smallest_index += 1
-        smallest_mutation_key = ordered_mutation_keys[0]
-
-        biggest_mutation_distance = biggest_mutation_key - \
-            smallest_mutation_key
-    
-
-def get_point_mutation_score(pos, point_mutations, indels, window_size):
-    max_subseqs = 0
-    checked_seq_refs = []
-    checked_point_mutations = {}
-    for seq_ref_a, seq_ref_point_mutations_a \
-            in point_mutations.items():
-        for seq_ref_b, seq_ref_point_mutations_b \
-                in point_mutations.items():
-            if seq_ref_a == seq_ref_b:
-                continue
-            if {seq_ref_a, seq_ref_b} in checked_seq_refs:
-                continue
-            else:
-                checked_seq_refs.append({seq_ref_a, seq_ref_b})
-                if seq_ref_a not in checked_point_mutations.keys():
-                    checked_point_mutations[seq_ref_a] = []
-                if seq_ref_b not in checked_point_mutations.keys():
-                    checked_point_mutations[seq_ref_b] = []
-            comon_positions = set(
-                seq_ref_point_mutations_a.keys()
-            ) & set(seq_ref_point_mutations_b.keys())
-            for pos in comon_positions:
-                if (seq_ref_point_mutations_a[pos] == '-' and
-                        seq_ref_point_mutations_b[pos] == '-'):
-                    continue
-                if (pos in checked_point_mutations[seq_ref_a] and
-                        pos in checked_point_mutations[seq_ref_b]):
-                    continue
-                elif (pos not in checked_point_mutations[seq_ref_a] and
-                        pos not in checked_point_mutations[seq_ref_b]):
-                    if (seq_ref_point_mutations_a[pos] !=
-                            seq_ref_point_mutations_b[pos]):
-                        if (seq_ref_point_mutations_a[pos] == '-' or
-                                seq_ref_point_mutations_b[pos] == '-'):
-                            max_subseqs += 1
-                        else:
-                            max_subseqs += 2
-                    else:
-                        max_subseqs += 1
-                    checked_point_mutations[seq_ref_a].append(pos)
-                    checked_point_mutations[seq_ref_b].append(pos)
-                else:
-                    if seq_ref_point_mutations_a[pos] != \
-                            seq_ref_point_mutations_b[pos]:
-                        if (pos not in
-                                checked_point_mutations[seq_ref_a] and
-                                seq_ref_point_mutations_a[pos] != '-'):
-                            max_subseqs += 1
-                        if (pos not in
-                                checked_point_mutations[seq_ref_b] and
-                                seq_ref_point_mutations_b[pos] != '-'):
-                            max_subseqs += 1
-                    if pos not in \
-                            checked_point_mutations[seq_ref_a]:
-                        checked_point_mutations[seq_ref_a] \
-                            .append(pos)
-                    if pos not in \
-                            checked_point_mutations[seq_ref_b]:
-                        checked_point_mutations[seq_ref_b] \
-                            .append(pos)
-            for pos, mut in seq_ref_point_mutations_a.items():
-                if (pos not in comon_positions and
-                        pos not in checked_point_mutations[seq_ref_a]):
-                    if mut != '-':
-                        max_subseqs += 1
-                    checked_point_mutations[seq_ref_a].append(pos)
-            for pos, mut in seq_ref_point_mutations_b.items():
-                if (pos not in comon_positions and
-                        pos not in checked_point_mutations[seq_ref_b]):
-                    if mut != '-':
-                        max_subseqs += 1
-                    checked_point_mutations[seq_ref_b].append(pos)
-
-def extract_max_subseqs_mutations(
-        point_mutations, indels, window_size):
-    max_subseqs = 0
-    checked_indels = set()
-    checked_seq_refs = []
-    for seq_ref_a, seq_ref_indels_a in indels.items():
-        for seq_ref_b, seq_ref_indels_b in indels.items():
-            if seq_ref_a == seq_ref_b:
-                continue
-            if {seq_ref_a, seq_ref_b} in checked_seq_refs:
-                continue
-            else:
-                checked_seq_refs.append({seq_ref_a, seq_ref_b})
-            ordered_a = collections.OrderedDict(
-                sorted(seq_ref_indels_a.items()))
-            indels_a = []
-            ordered_b = collections.OrderedDict(
-                sorted(seq_ref_indels_b.items()))
-            indels_b = []
-            prev_pos_a = None
-            current_indel = {}
-            for pos_a, mut_a in ordered_a.items():
-                if pos_a - prev_pos_a == 1:
-                    current_indel[pos_a] = mut_a
-                else:
-                    indels_a.append(current_indel)
-                    current_indel = {pos_a: mut_a}
-                prev_pos_a = pos_a
-            for pos_b, mut_b in ordered_b.items():
-                if pos_b - prev_pos_a == 1:
-                    current_indel[pos_b] = mut_b
-                else:
-                    indels_b.append(current_indel)
-                    current_indel = {pos_b: mut_b}
-                prev_pos_a = pos_b
-            checked_indel_groups = []
-            for indel_a in indels_a:
-                for indel_b in indels_b:
-                    if {indel_a, indel_b} in checked_indel_groups:
-                        continue
-                    else:
-                        checked_seq_refs.append({indel_a, indel_b})
-                    if indel_a == indel_b:
-                        if indel_a not in checked_indels:
-                            checked_indels.add(indel_a)
-                            max_subseqs += len(indel_a)
-                    else:
-                        for pos_a, mut_a in indel_a.items():
-                            if pos_a in indel_b.keys():
-                                if mut_a != indel_b[pos_a]:
-                                    max_subseqs += 1
-    
-    
+            for i in range(0, len(sequence) - window_size):
+                max_subseqs.add(sequence[i:i+window_size])
 
     return max_subseqs
+
+
+def get_mutation_subseqs(sequence, window_size, mutations):
+    add_seqs = []
+    for i in range(0, len(sequence) - window_size - 1):
+        add_subseq = sequence[i:i+window_size-1]
+        window_end = i + window_size - 1
+        if "-" in add_subseq:
+            add_subseq = get_seq_next_to_window_subseq_gaps(
+                sequence, add_subseq, window_size, window_end)
+        if add_subseq:
+            add_seqs.append(add_subseq)
+        new_seqs = get_sequences_mutations(
+            sequence, i, window_size, mutations)
+        for seq in new_seqs:
+            add_seqs.append(seq)
+    return add_seqs
+
+
+def get_sequences_mutations(sequence, window_start, window_size, mutations):
+    new_seqs = []
+    add_subseq = sequence[window_start:window_start+window_size-1]
+    mutations_in_range = get_mutations_in_range(
+        window_start, window_size, mutations)
+    if num_gaps_empty(mutations_in_range):
+        for seq in get_subseq_mutations(add_subseq,
+                                        mutations_in_range,
+                                        window_size):
+            new_seqs.append(seq)
+    else:
+        for seq in get_mutation_seqs_gaps(sequence, window_start,
+                                          window_size,
+                                          mutations):
+            new_seqs.append(seq)
+    return new_seqs
+
+
+def num_gaps_empty(mutations_in_range):
+    num_gaps = {}
+    for ref_seq, muts in mutations_in_range.items():
+        num_gaps[ref_seq] = 0
+        for mut in muts:
+            mut_start = next(iter(mut))
+            if "-" in mut[mut_start]:
+                num_gaps[ref_seq] += mut[mut_start].count("-")
+    for gaps in num_gaps.values():
+        if gaps > 0:
+            return False
+    return True
+
+
+def get_mutation_seqs_gaps(
+        sequence, window_start, window_size, mutations):
+    mutations_in_range = get_mutations_in_range(
+        window_start, window_size, mutations)
+    new_seqs = []
+    subseq = sequence[window_start:window_start+window_size-1]
+    for ref_seq, muts in mutations_in_range.items():
+        for mut_start, mut in muts.items():
+            new_subseq = subseq
+            new_subseq[mut_start:mut_start+len(mut)-1] = mut
+            new_subseq = new_subseq.replace("-", "")
+        if not new_subseq:
+            continue
+        elif len(new_subseq) < window_size:
+            window_end = window_start + window_size - 1
+            seq_next_gap = get_seq_next_to_window_mut_gaps(
+                sequence, new_subseq, window_size,
+                mutations, window_end, ref_seq)
+            if seq_next_gap:
+                new_seqs.append(seq_next_gap)
+        else:
+            new_seqs.append(new_subseq)
+    return new_seqs
+
+
+def get_seq_next_to_window_mut_gaps(
+        sequence, subseq, window_size, mutations, window_end, ref_seq):
+    diff = window_size - len(subseq)
+    new_window_end = window_end + diff - 1
+    if new_window_end > len(sequence) - 1:
+        return None
+    seq_diff = sequence[window_end:window_end+diff-1]
+    new_subseq = subseq + seq_diff
+    for mut_start, mut in mutations[ref_seq].items():
+        new_subseq = subseq
+        new_subseq[mut_start:mut_start+len(mut)-1] = mut
+        new_subseq = new_subseq.replace("-", "")
+    if len(new_subseq) < window_size:
+        return get_seq_next_to_window_mut_gaps(
+            sequence, new_subseq, window_size, mutations,
+            new_window_end, ref_seq)
+    else:
+        return new_subseq
+
+
+def get_seq_next_to_window_subseq_gaps(
+        sequence, subseq, window_size, window_end):
+    new_subseq = subseq.replace("-", "")
+    diff = window_size - len(new_subseq)
+    new_window_end = window_end + diff - 1
+    if new_window_end > len(sequence) - 1:
+        return None
+    seq_diff = sequence[window_end:window_end+diff-1]
+    new_subseq = new_subseq + seq_diff
+    new_subseq = subseq.replace("-", "")
+    if len(new_subseq) < window_size:
+        return get_seq_next_to_window_subseq_gaps(
+            sequence, new_subseq, window_size, new_window_end)
+    else:
+        return new_subseq
+
+
+def get_subseq_mutations(subseq, mutations_in_range, window_size):
+    new_seqs = []
+    for muts in mutations_in_range.values():
+        new_seq = subseq
+        for mut in muts:
+            mut_start = next(iter(mut))
+            mut_len = len(mut[mut_start])
+            mut_end = mut_start + mut_len - 1
+            if mut_end > window_size - 1:
+                mut_end = window_size - 1
+            new_seq[mut_start:mut_end] = mut[mut_start]
+        new_seqs.append(new_seq)
+
+
+def get_mutations_in_range(window_start, window_size, mutations):
+    mutations_in_range = {}
+    for ref_seq, muts in mutations.items():
+        for mut_start, mut in muts.items():
+            if mut_start in range(window_start, window_start+window_size) \
+                    or mut_start + len(mut) - 1 \
+                    in range(window_start, window_start+window_size):
+                if ref_seq in mutations_in_range.keys():
+                    mutations_in_range[ref_seq] = \
+                        {mut_start-window_start: mut}
+                else:
+                    mutations_in_range[ref_seq][
+                        mut_start - window_start] = mut
+    return mutations_in_range
+
+
+tree = generate_seqs_by_taxon_tree()
