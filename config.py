@@ -1,7 +1,7 @@
 import logging
 import random
 
-KRAKEN_PATH = "/home/andrey/generate_kraken_dataset/kraken2"
+KRAKEN_PATH = "/home/aschoier/workspace/kraken"
 KRAKEN_DATABASE = "viral"
 CSV_OUTPUT_PATH = "."
 MIN_SUBSEQ_LEN = 100

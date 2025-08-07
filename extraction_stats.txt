@@ -1,0 +1,8 @@
+taxonomic level 	 total nodes 	 selected nodes 	 min(max subseqs) 	 subseqs extraction 
+species 	 13961 	 13683 	 65 	 1247 
+genus 	 2758 	 2702 	 147 	 3023 
+family 	 251 	 246 	 1250 	 5178 
+order 	 71 	 69 	 2956 	 9244 
+class 	 40 	 40 	 9074 	 9074 
+phylum 	 17 	 17 	 163825 	 163825 
+kingdom 	 10 	 10 	 163825 	 163825 

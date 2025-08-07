@@ -8,3 +8,4 @@ check_aln_progress.sh
 slurm*
 extract_subseqs.out
 run_extraction.out
+.ipynb_checkpoints/

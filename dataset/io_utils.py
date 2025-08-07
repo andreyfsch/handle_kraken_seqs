@@ -38,6 +38,20 @@ from config import CSV_OUTPUT_PATH
 logger = logging.getLogger(__name__)
 
 
+def chunked_iterable(iterable, size):
+    it = iter(iterable)
+    while True:
+        chunk = []
+        try:
+            for _ in range(size):
+                chunk.append(next(it))
+        except StopIteration:
+            if chunk:
+                yield chunk
+            break
+        yield chunk
+
+
 def _extract_and_write_node(args):
     (
         node,
@@ -256,7 +270,17 @@ def write_csvs(
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=max_workers
             ) as executor:
-                results = list(executor.map(_extract_and_write_node, jobs))
+                CHUNK_SIZE = 200
+
+                def process_chunk(jobs_chunk):
+                    return [_extract_and_write_node(job) for job in jobs_chunk]
+
+                job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
+                results = []
+                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    for chunk_results in executor.map(process_chunk, job_chunks):
+                        for res in chunk_results:
+                            results.append(res)
         else:
             for job in jobs:
                 results.append(_extract_and_write_node(job))
