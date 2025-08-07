@@ -413,7 +413,7 @@ def get_parser():
         help="Extract/write per node in parallel"
     )
     parser_csv.add_argument("--max-workers", type=int,
-                            default=None, help="Max parallel worker processes")
+                            default=10, help="Max parallel worker processes")
     parser_csv.set_defaults(func=generate_csv)
 
     return parser

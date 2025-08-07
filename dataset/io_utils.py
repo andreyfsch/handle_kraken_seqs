@@ -267,14 +267,15 @@ def write_csvs(
                 output_path, rng, compression))
         logger.info(
             f"Extracting {num_seqs_extraction} sequences from "
-            f"{len(jobs)} nodes at level {taxonomic_level}."
+            f"{len(jobs)} nodes at level {taxonomic_level} "
+            f"with {max_workers} workers."
         )
         results = []
         if parallel and jobs:
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=max_workers
             ) as executor:
-                CHUNK_SIZE = 200
+                CHUNK_SIZE = 50
 
                 job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
                 results = []
