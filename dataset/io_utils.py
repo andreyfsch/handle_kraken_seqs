@@ -52,6 +52,10 @@ def chunked_iterable(iterable, size):
         yield chunk
 
 
+def process_chunk(jobs_chunk):
+    return [_extract_and_write_node(job) for job in jobs_chunk]
+
+
 def _extract_and_write_node(args):
     (
         node,
@@ -272,13 +276,15 @@ def write_csvs(
             ) as executor:
                 CHUNK_SIZE = 200
 
-                def process_chunk(jobs_chunk):
-                    return [_extract_and_write_node(job) for job in jobs_chunk]
-
                 job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
                 results = []
-                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    for chunk_results in executor.map(process_chunk, job_chunks):
+                with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
+                    for chunk_results in executor.map(
+                        process_chunk,
+                        job_chunks
+                    ):
                         for res in chunk_results:
                             results.append(res)
         else:
