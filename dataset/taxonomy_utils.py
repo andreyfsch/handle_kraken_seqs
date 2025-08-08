@@ -321,8 +321,13 @@ def generate_seqs_by_taxon_tree() -> Node:
         sequences = item["sequences"]
         path_parent_rank = ""
         for idx, ranked_taxon in enumerate(reversed(ranked_taxons)):
+            scientific_name_sanitized = ranked_taxon.scientific_name.replace(
+                " ", "_"
+            )
+            scientific_name_sanitized = scientific_name_sanitized.replace(
+                "/", "_")
             slash = "" if path_parent_rank == "" else "/"
-            path_parent_rank += slash + ranked_taxon.scientific_name
+            path_parent_rank += slash + scientific_name_sanitized
             try:
                 if path_parent_rank in visited_nodes:
                     already_added = True
@@ -356,7 +361,7 @@ def generate_seqs_by_taxon_tree() -> Node:
                     if ranked_taxon.rank.name == "superkingdom":
                         visited_nodes |= {path_parent_rank}
                         taxon_tree = Node.from_dict({
-                            "name": ranked_taxon.scientific_name,
+                            "name": scientific_name_sanitized,
                             "rank": ranked_taxon.rank.name
                         })
                     else:

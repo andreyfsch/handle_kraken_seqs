@@ -95,21 +95,25 @@ def extract_subseqs(
         blacklist = []
         while len(subseqs) < n:
             idx = rng.randrange(0, len(seq) - max_len + 1)
-            try_again = False
-            for pos in blacklist:
-                if idx >= pos and idx <= pos + max_len:
-                    try_again = True
-                    break
-            if try_again:
+            start, end = idx, idx + max_len
+            if any(
+                not (end <= b_start or start >= b_end)
+                for b_start, b_end in blacklist
+            ):
                 continue
-            else:
-                blacklist.append(idx)
-                subseqs.append(seq[idx: idx + max_len])
+            blacklist.append((start, end))
+            subseqs.append(seq[start:end])
     # extract non adjacent overlapping subsequences of max_len (window between)
     elif len(seq) < 2 * n * max_len and len(seq) >= n * max_len:
-        rest = (len(seq) / max_len) - n
-        rest_bases = int(math.floor(len(seq) / rest))
-        window_bases = int((rest_bases / n) - 1)
+        rest = (len(seq) // max_len) - n
+        if rest <= 0:
+            # exactly packed: just tile left→right
+            left_start = 0
+            for _ in range(n):
+                subseqs.append(seq[left_start:left_start + max_len])
+                left_start += max_len
+            return subseqs
+        window_bases = max(0, (len(seq) - n * max_len) // (n + 1))
         left_start = 0
         right_start = len(seq) - max_len
         if n % 2 == 0:
@@ -127,24 +131,23 @@ def extract_subseqs(
             subseqs.append(seq[mid_seq - mid_max_len: mid_seq + mid_max_len])
     # extract overlapping subsequences of length between min_len and max_len
     else:
-        iter = 0
-        iter_limit = n * 2
+        attempts = 0
+        iter_limit = n * 3  # give ourselves a bit more headroom
         while len(subseqs) < n:
-            iter += 1
-            if iter >= iter_limit:
-                max_len_subseq = max(subseqs, key=len)
-                max_len_subseqs = (i for i, x in enumerate(subseqs)
-                                   if len(x) == max_len_subseq)
-                subseqs.pop(max_len_subseqs.pop())
-            subseq_len = rng.randrange(min_len, min(max_len, len(seq)))
-            idx = rng.randrange(0, len(seq) - subseq_len + 1)
-            subseq = seq[idx: (idx + subseq_len)]
-            complement = get_complement(subseq)
-            if subseq not in subseqs:
-                subseqs.append(subseq)
-            if complement not in subseqs:
-                subseqs.append(complement)
-        # compensate double append when n is odd
+            attempts += 1
+            if attempts >= iter_limit and subseqs:
+                # back off by removing the current longest subseq
+                longest_idx = subseqs.index(max(subseqs, key=len))
+                subseqs.pop(longest_idx)
+            # choose a legal length (inclusive upper bound)
+            L = rng.randrange(min_len, min(max_len, len(seq)) + 1)
+            start = rng.randrange(0, len(seq) - L + 1)
+            s = seq[start:start + L]
+            c = get_complement(s)
+            if s not in subseqs:
+                subseqs.append(s)
+            if len(subseqs) < n and c not in subseqs:
+                subseqs.append(c)
         if len(subseqs) > n:
             subseqs.pop()
     return subseqs

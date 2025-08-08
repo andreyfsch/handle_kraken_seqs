@@ -36,6 +36,13 @@ from config import CSV_OUTPUT_PATH
 
 # Set up module logger
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s %(levelname)s:%(name)s: %(message)s"
+        )
+    )
 
 
 def chunked_iterable(iterable, size):
@@ -74,7 +81,12 @@ def _extract_and_write_node(args):
     try:
         virus_dict = {"sequence": [], "label": []}
         subseqs = get_subseqs_from_final_node(
-            node, num_seqs_extraction, min_subseq_len, max_subseq_len, rng
+            node,
+            num_seqs_extraction,
+            min_subseq_len,
+            max_subseq_len,
+            rng,
+            parallel=False
         )
         for subseq in subseqs:
             virus_dict["sequence"].append(subseq)
@@ -265,32 +277,27 @@ def write_csvs(
             jobs.append((
                 node, num_seqs_extraction, min_subseq_len, max_subseq_len, idx,
                 output_path, rng, compression))
+        results = []
+        if parallel and jobs:
+            if max_workers is None:
+                max_workers = min(32, os.cpu_count() or 1)
+
+            CHUNK_SIZE = 50
+            job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
+            results = []
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                for chunk_results in executor.map(process_chunk, job_chunks):
+                    results.extend(chunk_results)
+        else:
+            for job in jobs:
+                results.append(_extract_and_write_node(job))
         logger.info(
             f"Extracting {num_seqs_extraction} sequences from "
             f"{len(jobs)} nodes at level {taxonomic_level} "
             f"with {max_workers} workers."
         )
-        results = []
-        if parallel and jobs:
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                CHUNK_SIZE = 50
-
-                job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
-                results = []
-                with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=max_workers
-                ) as executor:
-                    for chunk_results in executor.map(
-                        process_chunk,
-                        job_chunks
-                    ):
-                        for res in chunk_results:
-                            results.append(res)
-        else:
-            for job in jobs:
-                results.append(_extract_and_write_node(job))
 
         # Concatenate all part files into final output
         part_files = [
