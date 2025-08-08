@@ -22,6 +22,7 @@ Designed for reproducibility, robustness, and safe concurrent data writing.
 import pandas as pd
 import numpy as np
 import os
+import taxoniq
 import random
 import logging
 import concurrent.futures
@@ -221,8 +222,10 @@ def write_csvs(
     desired_levels = ["species", "genus", "family",
                       "order", "class", "phylum", "kingdom"]
     taxonomic_levels = []
-    taxonomic_levels = [
-        lvl for lvl in taxonomic_levels if lvl in desired_levels]
+    generic_taxon = taxoniq.Taxon(100)
+    for generic_taxon_level in generic_taxon.ranked_lineage:
+        if generic_taxon_level.rank.name in desired_levels:
+            taxonomic_levels.append(generic_taxon_level.rank.name)
 
     for taxonomic_level in taxonomic_levels:
         logger.info(f"Processing taxonomic level: {taxonomic_level}")
