@@ -22,7 +22,6 @@ Designed for reproducibility, robustness, and safe concurrent data writing.
 import pandas as pd
 import numpy as np
 import os
-import taxoniq
 import random
 import logging
 import concurrent.futures
@@ -219,11 +218,11 @@ def write_csvs(
     logger.info("Starting tree construction.")
     tree = generate_seqs_by_taxon_tree()
     logger.info("Tree built. Starting dataset extraction.")
-
+    desired_levels = ["species", "genus", "family",
+                      "order", "class", "phylum", "kingdom"]
     taxonomic_levels = []
-    generic_taxon = taxoniq.Taxon(100)
-    for generic_taxon_level in generic_taxon.ranked_lineage:
-        taxonomic_levels.append(generic_taxon_level.rank.name)
+    taxonomic_levels = [
+        lvl for lvl in taxonomic_levels if lvl in desired_levels]
 
     for taxonomic_level in taxonomic_levels:
         logger.info(f"Processing taxonomic level: {taxonomic_level}")
@@ -294,7 +293,7 @@ def write_csvs(
             for job in jobs:
                 results.append(_extract_and_write_node(job))
         logger.info(
-            f"Extracting {num_seqs_extraction} sequences from "
+            f"Extracted {num_seqs_extraction} sequences from "
             f"{len(jobs)} nodes at level {taxonomic_level} "
             f"with {max_workers} workers."
         )
