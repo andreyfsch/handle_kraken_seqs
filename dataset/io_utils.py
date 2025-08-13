@@ -28,6 +28,7 @@ import signal
 import concurrent.futures
 import multiprocessing as mp
 import glob
+import gzip
 from tqdm.auto import tqdm
 from bigtree import find_attrs
 from dataset.taxonomy_utils import (
@@ -381,36 +382,76 @@ def write_csvs(
             f"with {max_workers} workers."
         )
 
-        # Concatenate all part files into final output
+        # --- Concatenate all part files into final output
+        # (streaming, O(1) mem) ---
+        # Use glob so we don't assume 1..N parts and work
+        # with zero-padded names
         part_files = sorted(glob.glob(f"{output_path}.part*"))
-        frames = []
-        for part_file in part_files:
-            if os.path.exists(part_file):
-                try:
-                    frames.append(
-                        pd.read_csv(
-                            part_file,
-                            compression='gzip' if compression else None
-                        )
-                    )
-                except Exception as e:
-                    logger.error(f"Could not read {part_file}: {e}")
-        if frames:
-            final_df = pd.concat(frames, ignore_index=True)
-            final_df.to_csv(output_path, index=False,
-                            compression='gzip' if compression else None)
-            logger.info(
-                f"Wrote final CSV: {output_path} ({len(final_df)} rows)")
-            # Clean up temp part files
-            for part_file in part_files:
-                try:
-                    os.remove(part_file)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not delete temp file {part_file}: {e}")
-        else:
+
+        if not part_files:
             logger.warning(
-                f"No valid data frames to write for level {taxonomic_level}.")
+                (
+                    f"No part files found for level {taxonomic_level}; "
+                    "skipping merge."
+                )
+            )
+        else:
+            # Choose text/gzip openers based on compression flag
+            if compression:
+                def opener_out(p): return gzip.open(p, "wt")
+
+                def opener_in(p): return gzip.open(p, "rt")
+            else:
+                def opener_out(p):
+                    return open(
+                        p, "w", encoding="utf-8", newline=""
+                    )
+
+                def opener_in(p):
+                    return open(
+                        p, "r", encoding="utf-8", newline=""
+                    )
+
+            # Write header once from the first non-empty part,
+            # then append rows from all parts
+            wrote_header = False
+            with opener_out(output_path) as fout:
+                for pf in part_files:
+                    if not os.path.exists(pf) or os.path.getsize(pf) == 0:
+                        continue
+                    try:
+                        with opener_in(pf) as fin:
+                            header = fin.readline()
+                            if not wrote_header:
+                                fout.write(header)
+                                wrote_header = True
+                            for line in fin:
+                                fout.write(line)
+                    except Exception as e:
+                        logger.error(f"Could not merge {pf}: {e}")
+
+            if wrote_header:
+                logger.info(
+                    (
+                        f"Wrote final CSV: {output_path} "
+                        f"(merged {len(part_files)} parts)"
+                    )
+                )
+            else:
+                logger.warning(
+                    (
+                        f"No data rows written for level {taxonomic_level} "
+                        "(all parts empty?)"
+                    )
+                )
+
+            # Clean up temp part files
+            for pf in part_files:
+                try:
+                    os.remove(pf)
+                except Exception as e:
+                    logger.warning(f"Could not delete temp file {pf}: {e}")
+
         mapping_path = output_path.replace(
             '.csv.gz', '_taxon_labels.csv'
         ).replace(
