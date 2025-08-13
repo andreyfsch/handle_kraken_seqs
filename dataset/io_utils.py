@@ -35,9 +35,11 @@ from dataset.taxonomy_utils import (
 )
 from config import CSV_OUTPUT_PATH
 
+DEFAULT_NODE_TIMEOUT = int(os.environ.get("CSV_NODE_TIMEOUT_SEC", "120"))
+
 
 def _init_worker():
-    # Avoid CPU oversubscription inside each process
+    # keep BLAS single-threaded per process to avoid oversubscription
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -45,6 +47,14 @@ def _init_worker():
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     except Exception:
         pass
+
+
+class _Timeout(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _Timeout()
 
 
 # Set up module logger
@@ -72,8 +82,27 @@ def chunked_iterable(iterable, size):
         yield chunk
 
 
+def _extract_and_write_node_guarded(job, timeout_s=DEFAULT_NODE_TIMEOUT):
+    old = signal.signal(signal.SIGALRM, _alarm_handler)
+    # Use setitimer for sub-second timers and to avoid drift
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return _extract_and_write_node(job)
+    except _Timeout:
+        node = job[0]
+        idx = job[4]
+        logger.error(
+            f"Timeout for node '{getattr(node, 'node_name', '?')}' "
+            f"({idx}) after {timeout_s}s; skipping."
+        )
+        return (node.node_name, idx, None, False, f"timeout {timeout_s}s")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, old)
+
+
 def process_chunk(jobs_chunk):
-    return [_extract_and_write_node(job) for job in jobs_chunk]
+    return [_extract_and_write_node_guarded(job) for job in jobs_chunk]
 
 
 def _extract_and_write_node(args):
@@ -291,13 +320,17 @@ def write_csvs(
             if max_workers is None:
                 max_workers = min(32, os.cpu_count() or 1)
 
-            backend = os.environ.get("CSV_BACKEND", "process").lower()
+            CHUNK_SIZE = int(os.environ.get("CSV_CHUNK_SIZE", "50"))
+            job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
+            results = []
 
+            backend = os.environ.get("CSV_BACKEND", "process").lower()
             if backend == "thread":
                 Executor = concurrent.futures.ThreadPoolExecutor
                 exec_kwargs = dict(max_workers=max_workers)
             else:
-                # use spawn to avoid fork-related deadlocks with libraries
+                # spawn avoids fork-related deadlocks;
+                # keep BLAS single-threaded
                 ctx = mp.get_context("spawn")
                 Executor = concurrent.futures.ProcessPoolExecutor
                 exec_kwargs = dict(
@@ -306,39 +339,19 @@ def write_csvs(
                     initializer=_init_worker,
                 )
 
-            results = []
             with Executor(**exec_kwargs) as executor:
-                futures = {executor.submit(
-                    _extract_and_write_node, job): job for job in jobs}
-
+                futures = [executor.submit(process_chunk, chunk)
+                           for chunk in job_chunks]
                 with tqdm(
                     total=len(jobs),
                     desc="Extracting & writing",
                     unit="node"
                 ) as pbar:
                     for fut in concurrent.futures.as_completed(futures):
-                        job = futures[fut]
-                        try:
-                            res = fut.result()
-                        except Exception as e:
-                            logger.error(
-                                (
-                                    f"Worker failed on node "
-                                    f"'{job[0].node_name}'"
-                                    f"({job[4]}): {e}"
-                                )
-                            )
-                            res = (
-                                job[0].node_name,
-                                job[4],
-                                None,
-                                False,
-                                str(e)
-                            )
-                        results.append(res)
-                        pbar.update(1)
+                        chunk_results = fut.result()
+                        results.extend(chunk_results)
+                        pbar.update(len(chunk_results))
         else:
-            # serial path with per-node progress
             for job in tqdm(jobs, desc="Extracting & writing", unit="node"):
                 results.append(_extract_and_write_node(job))
 
