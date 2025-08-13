@@ -26,6 +26,7 @@ import taxoniq
 import random
 import logging
 import concurrent.futures
+from tqdm.auto import tqdm
 from bigtree import find_attrs
 from dataset.taxonomy_utils import (
     generate_seqs_by_taxon_tree, extract_max_subseqs_set,
@@ -97,7 +98,6 @@ def _extract_and_write_node(args):
             df.to_csv(part_path, index=False, compression='gzip')
         else:
             df.to_csv(part_path, index=False)
-        logger.info(f"Wrote node '{node.node_name}' ({idx}) to {part_path}")
         return (node.node_name, idx, part_path, True, None)
     except Exception as e:
         logger.error(f"Failed to process node '{node.node_name}' ({idx}): {e}")
@@ -219,13 +219,8 @@ def write_csvs(
     logger.info("Starting tree construction.")
     tree = generate_seqs_by_taxon_tree()
     logger.info("Tree built. Starting dataset extraction.")
-    desired_levels = ["species", "genus", "family",
+    taxonomic_levels = ["species", "genus", "family",
                       "order", "class", "phylum", "kingdom"]
-    taxonomic_levels = []
-    generic_taxon = taxoniq.Taxon(100)
-    for generic_taxon_level in generic_taxon.ranked_lineage:
-        if generic_taxon_level.rank.name in desired_levels:
-            taxonomic_levels.append(generic_taxon_level.rank.name)
 
     for taxonomic_level in taxonomic_levels:
         logger.info(f"Processing taxonomic level: {taxonomic_level}")
@@ -287,14 +282,21 @@ def write_csvs(
             CHUNK_SIZE = 50
             job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
             results = []
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                for chunk_results in executor.map(process_chunk, job_chunks):
-                    results.extend(chunk_results)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # submit chunks
+                futures = [executor.submit(process_chunk, chunk) for chunk in job_chunks]
+
+                # progress bar counts *nodes*, updated by the size of each finished chunk
+                with tqdm(total=len(jobs), desc="Extracting & writing", unit="node") as pbar:
+                    for fut in concurrent.futures.as_completed(futures):
+                        chunk_results = fut.result()  # may raise; let it bubble up
+                        results.extend(chunk_results)
+                        pbar.update(len(chunk_results))
         else:
-            for job in jobs:
+            # serial path with per-node progress
+            for job in tqdm(jobs, desc="Extracting & writing", unit="node"):
                 results.append(_extract_and_write_node(job))
+        
         logger.info(
             f"Extracted {num_seqs_extraction} sequences from "
             f"{len(jobs)} nodes at level {taxonomic_level} "
