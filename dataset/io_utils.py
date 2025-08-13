@@ -22,10 +22,11 @@ Designed for reproducibility, robustness, and safe concurrent data writing.
 import pandas as pd
 import numpy as np
 import os
-import taxoniq
 import random
 import logging
+import signal
 import concurrent.futures
+import multiprocessing as mp
 from tqdm.auto import tqdm
 from bigtree import find_attrs
 from dataset.taxonomy_utils import (
@@ -33,6 +34,17 @@ from dataset.taxonomy_utils import (
     get_subseqs_from_final_node
 )
 from config import CSV_OUTPUT_PATH
+
+
+def _init_worker():
+    # Avoid CPU oversubscription inside each process
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
 
 
 # Set up module logger
@@ -220,7 +232,7 @@ def write_csvs(
     tree = generate_seqs_by_taxon_tree()
     logger.info("Tree built. Starting dataset extraction.")
     taxonomic_levels = ["species", "genus", "family",
-                      "order", "class", "phylum", "kingdom"]
+                        "order", "class", "phylum", "kingdom"]
 
     for taxonomic_level in taxonomic_levels:
         logger.info(f"Processing taxonomic level: {taxonomic_level}")
@@ -279,24 +291,57 @@ def write_csvs(
             if max_workers is None:
                 max_workers = min(32, os.cpu_count() or 1)
 
-            CHUNK_SIZE = 50
-            job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
-            results = []
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # submit chunks
-                futures = [executor.submit(process_chunk, chunk) for chunk in job_chunks]
+            backend = os.environ.get("CSV_BACKEND", "process").lower()
 
-                # progress bar counts *nodes*, updated by the size of each finished chunk
-                with tqdm(total=len(jobs), desc="Extracting & writing", unit="node") as pbar:
+            if backend == "thread":
+                Executor = concurrent.futures.ThreadPoolExecutor
+                exec_kwargs = dict(max_workers=max_workers)
+            else:
+                # use spawn to avoid fork-related deadlocks with libraries
+                ctx = mp.get_context("spawn")
+                Executor = concurrent.futures.ProcessPoolExecutor
+                exec_kwargs = dict(
+                    max_workers=max_workers,
+                    mp_context=ctx,
+                    initializer=_init_worker,
+                )
+
+            results = []
+            with Executor(**exec_kwargs) as executor:
+                futures = {executor.submit(
+                    _extract_and_write_node, job): job for job in jobs}
+
+                with tqdm(
+                    total=len(jobs),
+                    desc="Extracting & writing",
+                    unit="node"
+                ) as pbar:
                     for fut in concurrent.futures.as_completed(futures):
-                        chunk_results = fut.result()  # may raise; let it bubble up
-                        results.extend(chunk_results)
-                        pbar.update(len(chunk_results))
+                        job = futures[fut]
+                        try:
+                            res = fut.result()
+                        except Exception as e:
+                            logger.error(
+                                (
+                                    f"Worker failed on node "
+                                    f"'{job[0].node_name}'"
+                                    f"({job[4]}): {e}"
+                                )
+                            )
+                            res = (
+                                job[0].node_name,
+                                job[4],
+                                None,
+                                False,
+                                str(e)
+                            )
+                        results.append(res)
+                        pbar.update(1)
         else:
             # serial path with per-node progress
             for job in tqdm(jobs, desc="Extracting & writing", unit="node"):
                 results.append(_extract_and_write_node(job))
-        
+
         logger.info(
             f"Extracted {num_seqs_extraction} sequences from "
             f"{len(jobs)} nodes at level {taxonomic_level} "
