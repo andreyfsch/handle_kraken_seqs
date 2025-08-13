@@ -27,6 +27,7 @@ import logging
 import signal
 import concurrent.futures
 import multiprocessing as mp
+import glob
 from tqdm.auto import tqdm
 from bigtree import find_attrs
 from dataset.taxonomy_utils import (
@@ -133,7 +134,7 @@ def _extract_and_write_node(args):
         for subseq in subseqs:
             virus_dict["sequence"].append(subseq)
             virus_dict["label"].append(idx)
-        part_path = f"{output_path}.part{idx}"
+        part_path = f"{output_path}.part{idx:05d}"
         df = pd.DataFrame.from_dict(virus_dict)
         if compression:
             df.to_csv(part_path, index=False, compression='gzip')
@@ -322,35 +323,54 @@ def write_csvs(
 
             CHUNK_SIZE = int(os.environ.get("CSV_CHUNK_SIZE", "50"))
             job_chunks = list(chunked_iterable(jobs, CHUNK_SIZE))
-            results = []
 
-            backend = os.environ.get("CSV_BACKEND", "process").lower()
-            if backend == "thread":
-                Executor = concurrent.futures.ThreadPoolExecutor
-                exec_kwargs = dict(max_workers=max_workers)
-            else:
-                # spawn avoids fork-related deadlocks;
-                # keep BLAS single-threaded
+            # process chunks in waves so workers get respawned periodically
+            # ~10k nodes per wave with CHUNK_SIZE=50
+            WAVE_SIZE = int(os.environ.get("CSV_WAVE_CHUNKS", "200"))
+
+            remaining = list(range(len(job_chunks)))
+            pbar = tqdm(
+                total=len(jobs),
+                desc="Extracting & writing",
+                unit="node"
+            )
+
+            while remaining:
+                wave_idx = remaining[:WAVE_SIZE]
+                remaining = remaining[WAVE_SIZE:]
+
                 ctx = mp.get_context("spawn")
-                Executor = concurrent.futures.ProcessPoolExecutor
-                exec_kwargs = dict(
+                with concurrent.futures.ProcessPoolExecutor(
                     max_workers=max_workers,
                     mp_context=ctx,
                     initializer=_init_worker,
-                )
+                ) as executor:
+                    future_map = {executor.submit(
+                        process_chunk, job_chunks[i]): i for i in wave_idx}
+                    completed_this_wave = []
 
-            with Executor(**exec_kwargs) as executor:
-                futures = [executor.submit(process_chunk, chunk)
-                           for chunk in job_chunks]
-                with tqdm(
-                    total=len(jobs),
-                    desc="Extracting & writing",
-                    unit="node"
-                ) as pbar:
-                    for fut in concurrent.futures.as_completed(futures):
-                        chunk_results = fut.result()
-                        results.extend(chunk_results)
-                        pbar.update(len(chunk_results))
+                    try:
+                        for fut in concurrent.futures.as_completed(future_map):
+                            i = future_map[fut]
+                            chunk_results = fut.result()
+                            results.extend(chunk_results)
+                            pbar.update(len(chunk_results))
+                            completed_this_wave.append(i)
+                    except Exception as e:
+                        # A worker died (BrokenProcessPool or similar).
+                        # Drop back the unfinished chunk indices into
+                        # 'remaining' to retry next wave.
+                        failed = set(wave_idx) - set(completed_this_wave)
+                        remaining = list(failed) + remaining
+                        # Optional: log the reason; continue to next wave
+                        logger.error(
+                            (
+                                f"Wave aborted due to worker failure: {e}. "
+                                f"Retrying {len(failed)} chunks in next wave."
+                            )
+                        )
+
+            pbar.close()
         else:
             for job in tqdm(jobs, desc="Extracting & writing", unit="node"):
                 results.append(_extract_and_write_node(job))
@@ -362,8 +382,7 @@ def write_csvs(
         )
 
         # Concatenate all part files into final output
-        part_files = [
-            f"{output_path}.part{idx}" for idx in range(1, len(jobs) + 1)]
+        part_files = sorted(glob.glob(f"{output_path}.part*"))
         frames = []
         for part_file in part_files:
             if os.path.exists(part_file):
