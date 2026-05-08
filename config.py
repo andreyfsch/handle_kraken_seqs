@@ -1,7 +1,7 @@
 import logging
 import random
 
-KRAKEN_PATH = "/home/aschoier/workspace/kraken"
+KRAKEN_PATH = "/home/andrey/handle_kraken_seqs/kraken_downloads"
 KRAKEN_DATABASE = "viral"
 CSV_OUTPUT_PATH = "."
 MIN_SUBSEQ_LEN = 100

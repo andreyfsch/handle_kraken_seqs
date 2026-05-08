@@ -9,3 +9,5 @@ slurm*
 extract_subseqs.out
 run_extraction.out
 .ipynb_checkpoints/
+/.history/
+/.history/*
